@@ -1,0 +1,7 @@
+package com.shock.stream;
+import android.app.*;import android.os.*;import android.content.*;import android.media.projection.*;import android.widget.*;
+public class MainActivity extends Activity {
+ private static final int REQUEST=41; MediaProjectionManager manager; TextView status;
+ @Override public void onCreate(Bundle b){super.onCreate(b);manager=(MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE); LinearLayout l=new LinearLayout(this);l.setOrientation(1);l.setPadding(30,50,30,20);status=new TextView(this);status.setText("Shock Android Stream v0.1\nConecte o iPad à mesma rede Wi-Fi.\nServidor: porta 8088");Button start=new Button(this);start.setText("Autorizar captura e iniciar");start.setOnClickListener(v->startActivityForResult(manager.createScreenCaptureIntent(),REQUEST));Button stop=new Button(this);stop.setText("Parar transmissão");stop.setOnClickListener(v->stopService(new Intent(this,CaptureService.class)));l.addView(status);l.addView(start);l.addView(stop);setContentView(l);}
+ @Override protected void onActivityResult(int req,int result,Intent data){super.onActivityResult(req,result,data);if(req==REQUEST&&result==RESULT_OK&&data!=null){Intent i=new Intent(this,CaptureService.class);i.putExtra("result",result);i.putExtra("data",data);startForegroundService(i);status.setText("Captura solicitada. Abra http://IP_DO_ANDROID:8088 no iPad.\nConsulte o IP em Configurações > Wi-Fi.");}}
+}
