@@ -1,1 +1,3 @@
-plugins { id 'com.android.application' version '8.7.3' apply false }
+plugins { id 'com.android.application' }
+android { namespace 'com.shock.stream'; compileSdk 35
+ defaultConfig { applicationId 'com.shock.stream'; minSdk 26; targetSdk 34; versionCode 1; versionName '0.1.0' } }
