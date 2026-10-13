@@ -131,7 +131,7 @@ public class CaptureService extends Service {
      out.write(frame);out.write("\r\n".getBytes("UTF-8"));out.flush();
     }
    }else{
-    String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'><title>Shock Stream</title></head><body style='margin:0;background:#101116;color:#fff;font-family:Arial;text-align:center'><h3>Shock Android Stream</h3><p>Host online na porta 8088</p><img src='/stream' style='display:block;width:100%;height:auto' alt='Aguardando captura...'><p>Se a imagem nao aparecer, autorize a captura no Android.</p></body></html>";
+    String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><meta name='apple-mobile-web-app-capable' content='yes'><title>Shock Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}#video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain}#hint{position:absolute;bottom:8px;left:8px;color:#fff;background:#000;font:12px Arial;padding:4px;opacity:.7}</style></head><body><img id='video' src='/stream' alt='Aguardando captura'><div id='hint'>Shock Stream - toque para ocultar</div><script>document.getElementById('hint').onclick=function(){this.style.display='none'};</script></body></html>";
     byte[] body=html.getBytes("UTF-8");
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
