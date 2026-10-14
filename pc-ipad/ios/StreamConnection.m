@@ -7,9 +7,12 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 @interface StreamConnection ()
 @property(nonatomic) int fd;
+@property(nonatomic) int listenFD;
 @property(nonatomic) BOOL closed;
 @property(nonatomic) BOOL writing;
 @property(nonatomic,strong) NSMutableArray *outgoing;
@@ -17,7 +20,7 @@
 @end
 @implementation StreamConnection
 - (instancetype)init {
-    if((self=[super init])) { _fd=-1; _outgoing=[NSMutableArray new]; _writer=dispatch_queue_create("shock.writer",DISPATCH_QUEUE_SERIAL); }
+    if((self=[super init])) { _fd=-1; _listenFD=-1; _outgoing=[NSMutableArray new]; _writer=dispatch_queue_create("shock.writer",DISPATCH_QUEUE_SERIAL); }
     return self;
 }
 static BOOL readAll(int fd,void *buffer,size_t count) {
@@ -30,43 +33,65 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
     while(done<count) { ssize_t n=send(fd,bytes+done,count-done,0); if(n<=0)return NO; done+=(size_t)n; }
     return YES;
 }
+- (void)prepareSocket:(int)fd {
+    struct timeval timeout={5,0};
+    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+    int yes=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof(yes));
+}
+- (NSString *)receiveSocket:(int)fd pin:(NSString *)pin {
+    uint8_t challenge[38],response[CC_SHA256_DIGEST_LENGTH],accepted=0;
+    if(!readAll(fd,challenge,sizeof(challenge))||memcmp(challenge,"SHOCK1",6)!=0)return @"O PC não respondeu ao protocolo Shock Stream";
+    const char *key=pin.UTF8String;CCHmac(kCCHmacAlgSHA256,key,strlen(key),challenge+6,32,response);
+    if(!writeAll(fd,response,sizeof(response))||!readAll(fd,&accepted,1)||accepted!=1)return @"PIN incorreto ou host indisponível";
+    while(!self.closed) {
+        uint8_t header[5];if(!readAll(fd,header,5))break;
+        uint32_t length;memcpy(&length,header+1,4);length=ntohl(length);
+        if(length>4*1024*1024)return @"Pacote inválido";
+        NSMutableData *body=[NSMutableData dataWithLength:length];if(!readAll(fd,body.mutableBytes,length))break;
+        if(self.received)self.received(header[0],body);
+    }
+    return @"Conexão encerrada";
+}
+- (void)finishSocket:(int)fd reason:(NSString *)reason {
+    [self disconnect];dispatch_sync(self.writer,^{});
+    @synchronized(self){if(self.fd==fd){close(fd);self.fd=-1;}}
+    if(self.ended)self.ended(reason);
+}
 - (void)connectHost:(NSString *)host port:(int)port pin:(NSString *)pin {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),^{
         @autoreleasepool {
-            NSString *reason=@"Conexão encerrada";
-            int fd=socket(AF_INET,SOCK_STREAM,0);
-            if(fd<0) { if(self.ended)self.ended(@"Não foi possível abrir a conexão"); return; }
-            @synchronized(self) { if(self.closed){close(fd);return;} self.fd=fd; }
-            struct timeval timeout={5,0};
-            setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
-            setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
-            int yes=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
-            setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof(yes));
-            struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_port=htons((uint16_t)port);
+            int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0){if(self.ended)self.ended(@"Não foi possível abrir a conexão");return;}
+            @synchronized(self){if(self.closed){close(fd);return;}self.fd=fd;}
+            [self prepareSocket:fd];struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_port=htons((uint16_t)port);
+            NSString *reason;
             if(inet_pton(AF_INET,host.UTF8String,&address.sin_addr)!=1)reason=@"Informe o IP IPv4 do PC";
             else if(connect(fd,(struct sockaddr *)&address,sizeof(address))<0)reason=@"PC não encontrado; confira IP, porta e Firewall";
+            else reason=[self receiveSocket:fd pin:pin];
+            [self finishSocket:fd reason:reason];
+        }
+    });
+}
+- (void)waitUSBWithPIN:(NSString *)pin {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),^{
+        @autoreleasepool {
+            int listener=socket(AF_INET,SOCK_STREAM,0);if(listener<0){if(self.ended)self.ended(@"Não foi possível preparar o USB");return;}
+            @synchronized(self){if(self.closed){close(listener);return;}self.listenFD=listener;}
+            int yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+            struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_port=htons(8091);address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+            NSString *reason=@"Espera USB encerrada";int fd=-1;
+            if(bind(listener,(struct sockaddr *)&address,sizeof(address))<0||listen(listener,1)<0)reason=@"Porta USB indisponível. Feche e abra o app novamente.";
             else {
-                uint8_t challenge[38],response[CC_SHA256_DIGEST_LENGTH],accepted=0;
-                if(readAll(fd,challenge,sizeof(challenge))&&memcmp(challenge,"SHOCK1",6)==0) {
-                    const char *key=pin.UTF8String;
-                    CCHmac(kCCHmacAlgSHA256,key,strlen(key),challenge+6,32,response);
-                    if(writeAll(fd,response,sizeof(response))&&readAll(fd,&accepted,1)&&accepted==1) {
-                        while(!self.closed) {
-                            uint8_t header[5];if(!readAll(fd,header,5))break;
-                            uint32_t length;memcpy(&length,header+1,4);length=ntohl(length);
-                            if(length>4*1024*1024){reason=@"Pacote inválido";break;}
-                            NSMutableData *body=[NSMutableData dataWithLength:length];
-                            if(!readAll(fd,body.mutableBytes,length))break;
-                            if(self.received)self.received(header[0],body);
-                        }
-                    } else reason=@"PIN incorreto ou host indisponível";
-                } else reason=@"O PC não respondeu ao protocolo Shock Stream";
+                fcntl(listener,F_SETFL,fcntl(listener,F_GETFL,0)|O_NONBLOCK);
+                while(!self.closed) {
+                    fd_set set;FD_ZERO(&set);FD_SET(listener,&set);struct timeval timeout={0,500000};
+                    int ready=select(listener+1,&set,NULL,NULL,&timeout);
+                    if(ready<0)break;if(ready==0)continue;
+                    fd=accept(listener,NULL,NULL);if(fd>=0)break;
+                }
             }
-            [self disconnect];
-            // Keep the descriptor reserved until the reader and queued writer stop.
-            dispatch_sync(self.writer,^{});
-            @synchronized(self) { if(self.fd==fd){close(fd);self.fd=-1;} }
-            if(self.ended)self.ended(reason);
+            @synchronized(self){close(listener);self.listenFD=-1;if(fd>=0)self.fd=fd;}
+            if(fd>=0){[self prepareSocket:fd];reason=[self receiveSocket:fd pin:pin];[self finishSocket:fd reason:reason];}
+            else {[self disconnect];if(self.ended)self.ended(reason);}
         }
     });
 }
@@ -81,6 +106,14 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
             NSDictionary *old=[NSJSONSerialization JSONObjectWithData:last[@"body"] options:0 error:nil];
             NSDictionary *next=[NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
             if([old[@"buttons"] isEqual:next[@"buttons"]]&&[old[@"lt"] isEqual:next[@"lt"]]&&[old[@"rt"] isEqual:next[@"rt"]]) [self.outgoing removeLastObject];
+        }
+        if(kind==14&&[last[@"kind"] intValue]==14) {
+            NSArray *old=[NSJSONSerialization JSONObjectWithData:last[@"body"] options:0 error:nil];
+            NSArray *next=[NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+            BOOL moves=YES;NSMutableDictionary *merged=[NSMutableDictionary new];
+            for(NSDictionary *event in old){if(![event[@"a"] isEqual:@"move"])moves=NO;merged[event[@"id"]]=event;}
+            for(NSDictionary *event in next){if(![event[@"a"] isEqual:@"move"])moves=NO;merged[event[@"id"]]=event;}
+            if(moves){[self.outgoing removeLastObject];body=[NSJSONSerialization dataWithJSONObject:merged.allValues options:0 error:nil];}
         }
         if(self.outgoing.count>=128){[self disconnect];return;}
         [self.outgoing addObject:@{@"kind":@(kind),@"body":body}];
@@ -106,6 +139,7 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
     @synchronized(self) {
         if(self.closed)return;self.closed=YES;[self.outgoing removeAllObjects];
         if(self.fd>=0)shutdown(self.fd,SHUT_RDWR);
+        if(self.listenFD>=0)shutdown(self.listenFD,SHUT_RDWR);
     }
 }
 @end

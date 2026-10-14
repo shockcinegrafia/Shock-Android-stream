@@ -10,6 +10,7 @@ import time
 MAGIC = b"SHOCK1"
 VIDEO, AUDIO, INFO, ERROR = 1, 2, 3, 4
 ACK, PAD, BYE, HEARTBEAT = 10, 11, 12, 13
+TOUCH = 14
 MAX_PACKET = 4 * 1024 * 1024
 HEADER = struct.Struct("!BI")
 

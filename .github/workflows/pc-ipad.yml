@@ -25,6 +25,19 @@ jobs:
           python pc-ipad/scripts/install_gamepad.py
       - name: Test protocol, H.264 and gamepad state
         run: python -m unittest discover -s pc-ipad/tests -v
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Bundle official driver packages and build setup helper
+        run: |
+          python pc-ipad/scripts/bundle_drivers.py
+          New-Item -ItemType Directory -Force build | Out-Null
+          cl /nologo /std:c++17 /EHsc /MT pc-ipad/windows/driver_setup.cpp /Febuild/DriverSetup.exe /Fobuild/DriverSetup.obj
+          if ($LASTEXITCODE -ne 0) { throw 'Driver helper compilation failed' }
+          $sig = Get-AuthenticodeSignature pc-ipad/drivers/ViGEmBus.exe
+          if ($sig.Status -ne 'Valid') { throw 'Invalid gamepad installer signature' }
+          $cat = Get-AuthenticodeSignature pc-ipad/drivers/vdd/mttvdd.cat
+          if ($cat.Status -ne 'Valid') { throw 'Invalid display driver catalog signature' }
       - name: Build Windows program
         run: python pc-ipad/scripts/build_windows.py
       - name: Verify packaged program dependencies
