@@ -31,6 +31,9 @@ public class CaptureService extends Service {
  private final AtomicReference<byte[]> latest=new AtomicReference<>();
  private final Object frameLock=new Object();
  private long lastFrame=0;
+ private Bitmap frameBitmap;
+ private Bitmap croppedBitmap;
+ private ByteArrayOutputStream jpegBuffer;
 
  private void status(String value){
   Intent i=new Intent(STATUS_ACTION);
@@ -72,7 +75,7 @@ public class CaptureService extends Service {
    DisplayMetrics metrics=new DisplayMetrics();
    ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(metrics);
    int width=metrics.widthPixels,height=metrics.heightPixels;
-   float scale=Math.min(1f,960f/Math.max(width,height));
+   float scale=Math.min(1f,800f/Math.max(width,height));
    width=Math.max(2,((int)(width*scale))&~1);
    height=Math.max(2,((int)(height*scale))&~1);
    reader=ImageReader.newInstance(width,height,PixelFormat.RGBA_8888,2);
@@ -82,19 +85,27 @@ public class CaptureService extends Service {
      image=r.acquireLatestImage();
      if(image==null)return;
      long now=android.os.SystemClock.elapsedRealtime();
-     if(now-lastFrame<100)return;
+     if(now-lastFrame<66)return;
      lastFrame=now;
      Image.Plane plane=image.getPlanes()[0];
      ByteBuffer buffer=plane.getBuffer();
      int pixelStride=plane.getPixelStride(),rowStride=plane.getRowStride();
      int w=image.getWidth(),h=image.getHeight();
-     Bitmap padded=Bitmap.createBitmap(rowStride/pixelStride,h,Bitmap.Config.ARGB_8888);
-     padded.copyPixelsFromBuffer(buffer);
-     Bitmap cropped=Bitmap.createBitmap(padded,0,0,w,h);
-     ByteArrayOutputStream out=new ByteArrayOutputStream();
-     cropped.compress(Bitmap.CompressFormat.JPEG,65,out);
-     cropped.recycle();padded.recycle();
-     latest.set(out.toByteArray());
+     int paddedWidth=rowStride/pixelStride;
+     if(frameBitmap==null||frameBitmap.getWidth()!=paddedWidth||frameBitmap.getHeight()!=h){
+      if(frameBitmap!=null)frameBitmap.recycle();
+      if(croppedBitmap!=null)croppedBitmap.recycle();
+      frameBitmap=Bitmap.createBitmap(paddedWidth,h,Bitmap.Config.ARGB_8888);
+      croppedBitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);
+      jpegBuffer=new ByteArrayOutputStream(160000);
+     }
+     buffer.rewind();
+     frameBitmap.copyPixelsFromBuffer(buffer);
+     Canvas canvas=new Canvas(croppedBitmap);
+     canvas.drawBitmap(frameBitmap,0,0,null);
+     jpegBuffer.reset();
+     croppedBitmap.compress(Bitmap.CompressFormat.JPEG,60,jpegBuffer);
+     latest.set(jpegBuffer.toByteArray());
      synchronized(frameLock){frameLock.notifyAll();}
     }catch(Exception e){android.util.Log.e("ShockStream","Frame error",e);}
     finally{if(image!=null)image.close();}
@@ -158,6 +169,9 @@ public class CaptureService extends Service {
  }
  private synchronized void stopCapture(){
   capturing=false;latest.set(null);
+  if(frameBitmap!=null){frameBitmap.recycle();frameBitmap=null;}
+  if(croppedBitmap!=null){croppedBitmap.recycle();croppedBitmap=null;}
+  jpegBuffer=null;
   if(display!=null){display.release();display=null;}
   if(reader!=null){reader.close();reader=null;}
   if(projection!=null){MediaProjection p=projection;projection=null;p.stop();}
