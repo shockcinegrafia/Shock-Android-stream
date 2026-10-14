@@ -9,7 +9,7 @@ dll=Path(next(iter(spec.submodule_search_locations)))/'win/vigem/client/x64/ViGE
 assert dll.is_file()
 PyInstaller.__main__.run([
     '--noconfirm','--clean','--onedir','--windowed','--name','ShockStream',
-    '--collect-all','av','--collect-all','soundcard','--hidden-import','_cffi_backend',
+    '--collect-all','av','--collect-all','soundcard','--collect-all','zeroconf','--hidden-import','_cffi_backend',
     '--add-binary',str(dll)+';vgamepad/win/vigem/client/x64',
     '--add-binary',str(Path('build/DriverSetup.exe').resolve())+';.',
     '--add-data',str(Path('pc-ipad/drivers').resolve())+';drivers',

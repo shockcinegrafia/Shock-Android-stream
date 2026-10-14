@@ -2,6 +2,7 @@ av==16.1.0
 mss==10.1.0
 numpy==2.2.6
 soundcard==0.4.5
+zeroconf==0.151.5
 # vgamepad 0.1.0 is installed by scripts/install_gamepad.py without running its driver installer.
 pyinstaller==6.16.0
 cffi==2.1.1

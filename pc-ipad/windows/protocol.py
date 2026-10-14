@@ -10,7 +10,7 @@ import time
 MAGIC = b"SHOCK1"
 VIDEO, AUDIO, INFO, ERROR = 1, 2, 3, 4
 ACK, PAD, BYE, HEARTBEAT = 10, 11, 12, 13
-TOUCH = 14
+TOUCH, CLIENT_INFO = 14, 15
 MAX_PACKET = 4 * 1024 * 1024
 HEADER = struct.Struct("!BI")
 
@@ -45,6 +45,24 @@ def proof(pin, nonce):
 def fit_size(width, height, longest=1024):
     scale = min(1.0, longest / max(width, height))
     return max(2, int(width * scale) & ~1), max(2, int(height * scale) & ~1)
+
+
+def validate_display(value):
+    if not isinstance(value, dict):
+        raise ValueError('Tela do iPad inválida')
+    size = (value.get('width'), value.get('height'))
+    if any(isinstance(n, bool) or not isinstance(n, int) for n in size):
+        raise ValueError('Resolução inválida')
+    if size not in ((1024, 768), (768, 1024)):
+        raise ValueError('Resolução fora do display do iPad mini 1')
+    return size
+
+
+def display_id(value):
+    identity = value.get('displayId')
+    if identity is not None and (isinstance(identity, bool) or not isinstance(identity, int) or not 0 <= identity <= 2147483647):
+        raise ValueError('Identificador de tela inválido')
+    return identity
 
 
 def validate_pad(value):

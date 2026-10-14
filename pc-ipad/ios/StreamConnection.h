@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 @interface StreamConnection : NSObject
+@property(nonatomic,copy) void (^authenticated)(void);
 @property(nonatomic,copy) void (^received)(uint8_t kind,NSData *body);
 @property(nonatomic,copy) void (^ended)(NSString *reason);
 - (void)connectHost:(NSString *)host port:(int)port pin:(NSString *)pin;

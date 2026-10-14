@@ -3,6 +3,7 @@ import ctypes as C
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 def resource_root():return Path(getattr(sys,'_MEIPASS',Path(__file__).resolve().parents[1]))
 
@@ -37,12 +38,19 @@ def monitor_driver(uninstall=False):
 
 def prepare_apple_usb():
     # Apple binaries remain in Apple's installer, fetched/verified by Windows Package Manager.
-    try:
-        from usbmux import list_devices
-        list_devices()
-        return 0
-    except (OSError,RuntimeError,ValueError):pass
+    from usbmux import diagnostics
+    status=diagnostics()
+    if status['status'] in ('ready','no_device'):
+        return status['message']
+    if status['status']=='protocol_error':
+        raise RuntimeError(status['message'])
     command=['winget','install','--id','Apple.iTunes','--exact','--source','winget',
              '--interactive','--accept-source-agreements','--disable-interactivity']
     result=subprocess.run(command,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW)
     if result.returncode:raise RuntimeError('O suporte Apple não foi instalado. Confira o Windows Package Manager e a instalação do iTunes. Código '+str(result.returncode))
+    for _ in range(10):
+        status=diagnostics()
+        if status['status'] in ('ready','no_device'):
+            return status['message']
+        time.sleep(0.5)
+    raise RuntimeError('Instalação concluída, mas o serviço USB Apple não respondeu. Reinicie o Apple Mobile Device Service ou o Windows e tente novamente. '+status['message'])

@@ -13,7 +13,7 @@
 @interface StreamConnection ()
 @property(nonatomic) int fd;
 @property(nonatomic) int listenFD;
-@property(nonatomic) BOOL closed;
+@property(atomic) BOOL closed;
 @property(nonatomic) BOOL writing;
 @property(nonatomic,strong) NSMutableArray *outgoing;
 @property(nonatomic,strong) dispatch_queue_t writer;
@@ -38,11 +38,28 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
     setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
     int yes=1;setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof(yes));
 }
+static BOOL connectWithin(int fd,const struct sockaddr_in *address) {
+    int flags=fcntl(fd,F_GETFL,0);
+    if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0)return NO;
+    int result=connect(fd,(const struct sockaddr *)address,sizeof(*address));
+    if(result<0&&errno==EINPROGRESS) {
+        fd_set writeSet;FD_ZERO(&writeSet);FD_SET(fd,&writeSet);struct timeval timeout={3,0};
+        result=select(fd+1,NULL,&writeSet,NULL,&timeout);
+        if(result>0){int error=0;socklen_t length=sizeof(error);result=getsockopt(fd,SOL_SOCKET,SO_ERROR,&error,&length)==0&&error==0?0:-1;}
+        else result=-1;
+    }
+    if(fcntl(fd,F_SETFL,flags)<0)return NO;
+    return result==0;
+}
 - (NSString *)receiveSocket:(int)fd pin:(NSString *)pin {
     uint8_t challenge[38],response[CC_SHA256_DIGEST_LENGTH],accepted=0;
     if(!readAll(fd,challenge,sizeof(challenge))||memcmp(challenge,"SHOCK1",6)!=0)return @"O PC não respondeu ao protocolo Shock Stream";
     const char *key=pin.UTF8String;CCHmac(kCCHmacAlgSHA256,key,strlen(key),challenge+6,32,response);
-    if(!writeAll(fd,response,sizeof(response))||!readAll(fd,&accepted,1)||accepted!=1)return @"PIN incorreto ou host indisponível";
+    if(!writeAll(fd,response,sizeof(response))||!readAll(fd,&accepted,1))return @"A conexão foi interrompida durante o emparelhamento";
+    if(accepted==0)return @"PIN incorreto";
+    if(accepted!=1)return @"Resposta de emparelhamento inválida";
+    if(self.closed)return @"Conexão encerrada";
+    if(self.authenticated)self.authenticated();
     while(!self.closed) {
         uint8_t header[5];if(!readAll(fd,header,5))break;
         uint32_t length;memcpy(&length,header+1,4);length=ntohl(length);
@@ -65,7 +82,7 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
             [self prepareSocket:fd];struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_port=htons((uint16_t)port);
             NSString *reason;
             if(inet_pton(AF_INET,host.UTF8String,&address.sin_addr)!=1)reason=@"Informe o IP IPv4 do PC";
-            else if(connect(fd,(struct sockaddr *)&address,sizeof(address))<0)reason=@"PC não encontrado; confira IP, porta e Firewall";
+            else if(!connectWithin(fd,&address))reason=@"PC não encontrado; confira IP, porta e Firewall";
             else reason=[self receiveSocket:fd pin:pin];
             [self finishSocket:fd reason:reason];
         }
@@ -90,7 +107,10 @@ static BOOL writeAll(int fd,const void *buffer,size_t count) {
                 }
             }
             @synchronized(self){close(listener);self.listenFD=-1;if(fd>=0)self.fd=fd;}
-            if(fd>=0){[self prepareSocket:fd];reason=[self receiveSocket:fd pin:pin];[self finishSocket:fd reason:reason];}
+            if(fd>=0){
+                int flags=fcntl(fd,F_GETFL,0);if(flags>=0)fcntl(fd,F_SETFL,flags&~O_NONBLOCK);
+                [self prepareSocket:fd];reason=[self receiveSocket:fd pin:pin];[self finishSocket:fd reason:reason];
+            }
             else {[self disconnect];if(self.ended)self.ended(reason);}
         }
     });

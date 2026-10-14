@@ -16,10 +16,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import webbrowser
 
-from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH,
-                      LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad)
+from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO,
+                      LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id)
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -75,7 +75,8 @@ def make_encoder(width, height, fps):
 
 
 class Session:
-    def __init__(self, connection, gamepad, fps, size, audio, report, mode="gamepad", monitor=None):
+    def __init__(self, connection, gamepad, fps, size, audio, report, mode="gamepad", monitor=None,
+                 host_id='', client_size=(1024, 768), client_display_id=None):
         self.sock = connection
         self.gamepad = gamepad
         self.fps, self.size, self.audio = fps, size, audio
@@ -89,6 +90,31 @@ class Session:
         self.capture_error = None
         self.threads = []
         self.width = self.height = 0
+        self.host_id = host_id
+        self.display_lock = threading.Lock()
+        self.client_size = client_size
+        self.display_generation = 0
+        self.client_display_id = client_display_id
+        self.geometry_ready = threading.Event()
+        self.geometry_ready.set()
+
+    def display_preferences(self, body):
+        value = json.loads(body)
+        size = validate_display(value)
+        identity = display_id(value)
+        with self.display_lock:
+            self.geometry_ready.clear()
+            self.gamepad.neutral()
+            self.client_size = size
+            self.display_generation += 1
+            self.client_display_id = identity
+
+    def info(self):
+        return {"version": 1, "appVersion": VERSION, "hostId": self.host_id, "name": socket.gethostname(),
+                "width": self.width, "height": self.height, "fps": self.fps, "audio": self.audio,
+                "displayId": self.client_display_id,
+                "sampleRate": 44100, "channels": 2, "mode": self.mode,
+                "gamepad": "Xbox 360" if self.mode == 'gamepad' else None}
 
     def close(self):
         self.stop.set()
@@ -104,17 +130,43 @@ class Session:
         try:
             import mss
             import numpy as np
+            from desktop import fit_target, set_ipad_resolution, monitors
             with mss.mss() as capture:
                 monitor = self.monitor or capture.monitors[1]
-                monitor={key:monitor[key] for key in ('left','top','width','height')}
-                if self.mode=='touch':self.gamepad.set_monitor(monitor)
-                self.width, self.height = fit_size(monitor["width"], monitor["height"], self.size)
+                previous = None
+                next_geometry_check = 0
                 period = 1 / self.fps
                 while not self.stop.is_set():
                     started = time.monotonic()
-                    image = capture.grab(monitor)
+                    if monitor.get('device') and started >= next_geometry_check:
+                        next_geometry_check = started + 1
+                        current = next((m for m in monitors() if m['device']==monitor['device']),None)
+                        if current is None:raise RuntimeError('A tela selecionada foi desconectada')
+                        if any(current[k]!=monitor[k] for k in ('left','top','width','height')):
+                            with self.display_lock:
+                                self.geometry_ready.clear()
+                                self.gamepad.neutral()
+                                self.display_generation += 1
+                            monitor = current
+                            previous = None
+                    with self.display_lock:
+                        target = self.client_size
+                        generation = self.display_generation
+                    if target != previous:
+                        if monitor.get('virtual'):
+                            try:
+                                monitor = set_ipad_resolution(monitor, *target)
+                            except RuntimeError as exc:
+                                self.report('Resolução do monitor virtual: ' + str(exc))
+                        if self.mode == 'touch':
+                            self.gamepad.neutral()
+                            self.gamepad.set_monitor(monitor)
+                        previous = target
+                    width, height = fit_target(monitor['width'], monitor['height'], *target, self.size)
+                    rect = {key: monitor[key] for key in ('left', 'top', 'width', 'height')}
+                    image = capture.grab(rect)
                     # Copy so the single latest frame owns its backing memory.
-                    self.latest.put(np.array(image, dtype=np.uint8, copy=True))
+                    self.latest.put((np.array(image, dtype=np.uint8, copy=True), width, height, target, generation))
                     self.stop.wait(max(0, period - (time.monotonic() - started)))
         except Exception as exc:
             self.capture_error = exc
@@ -145,7 +197,10 @@ class Session:
                 elif kind == PAD and self.mode=="gamepad" and len(body) <= 2048:
                     self.gamepad.apply(json.loads(body))
                 elif kind == TOUCH and self.mode=="touch" and len(body)<=8192:
-                    self.gamepad.events(json.loads(body))
+                    if self.geometry_ready.is_set():
+                        self.gamepad.events(json.loads(body))
+                elif kind == CLIENT_INFO and len(body) <= 512:
+                    self.display_preferences(body)
                 elif kind == HEARTBEAT and not body:
                     pass  # Liveness does not extend a held gamepad state.
                 elif kind == BYE:
@@ -178,18 +233,39 @@ class Session:
             sequence, raw = self.latest.take_after(0, 3)
             if raw is None:
                 raise RuntimeError("Não foi possível capturar o monitor: " + str(self.capture_error))
-            encoder = make_encoder(self.width, self.height, self.fps)
-            info = {"version": 1, "width": self.width, "height": self.height, "fps": self.fps,
-                    "audio": self.audio, "sampleRate": 44100, "channels": 2, "mode":self.mode, "gamepad": "Xbox 360" if self.mode=="gamepad" else None}
-            self.sock.sendall(packet(INFO, json.dumps(info).encode()))
+            encoder = None
             for target in ([self.receive, self.watchdog, self.capture_audio] if self.audio else [self.receive, self.watchdog]):
                 worker = threading.Thread(target=target, daemon=True)
                 self.threads.append(worker)
                 worker.start()
-            self.report(f"iPad conectado · {self.width} × {self.height} · {self.fps} FPS alvo")
             pts = 0
             while not self.stop.is_set():
-                frame = av.VideoFrame.from_ndarray(raw, format="bgra").reformat(self.width, self.height, format="yuv420p")
+                if isinstance(raw, tuple):
+                    image, width, height, target = raw[:4]
+                    with self.display_lock:
+                        current_target = self.client_size
+                        generation = self.display_generation
+                    frame_generation = raw[4] if len(raw)>4 else generation
+                    if target != current_target or frame_generation != generation:
+                        sequence, next_frame = self.latest.take_after(sequence)
+                        if next_frame is not None:
+                            raw = next_frame
+                        continue
+                else:
+                    image, width, height = raw, self.width, self.height
+                    frame_generation = self.display_generation
+                if encoder is None or (width, height) != (self.width, self.height) or not self.geometry_ready.is_set():
+                    candidate = make_encoder(width, height, self.fps)
+                    with self.display_lock:
+                        if frame_generation != self.display_generation:
+                            continue
+                        self.width, self.height = width, height
+                        encoder = candidate
+                        pts = 0
+                        self.sock.sendall(packet(INFO, json.dumps(self.info()).encode()))
+                        self.geometry_ready.set()
+                    self.report(f"iPad conectado · {width} × {height} · {self.fps} FPS alvo · {self.mode}")
+                frame = av.VideoFrame.from_ndarray(image, format="bgra").reformat(self.width, self.height, format="yuv420p")
                 frame.pts = pts
                 pts += 1
                 encoded = b"".join(bytes(p) for p in encoder.encode(frame))
@@ -209,6 +285,8 @@ class Session:
                 sequence, next_frame = self.latest.take_after(sequence)
                 if next_frame is not None:
                     raw = next_frame
+            if self.capture_error:
+                raise RuntimeError('Captura interrompida: '+str(self.capture_error))
         finally:
             self.close()
             for worker in self.threads:
@@ -216,101 +294,160 @@ class Session:
 
 
 class Host:
-    def __init__(self, report):
+    def __init__(self, report, identity=None):
         self.report = report
+        if identity is None:
+            from settings import load_settings
+            identity = load_settings()
+        self.identity = identity
+        self.pin = identity['pin']
         self.stop_event = threading.Event()
-        self.listener = None
-        self.session = None
-        self.pad = None
-        self.thread = None
-        self.pending_connection=None
+        self.listener = self.session = self.pad = self.thread = self.advertiser = None
+        self.workers = []
+        self.active_lock = threading.Lock()
+        self.connections_lock = threading.Lock()
+        self.connections = set()
 
-    def start(self, fps=30, longest=1024, audio=True, port=8090, mode="wifi", monitor=None, device_id=None):
-        if self.thread and self.thread.is_alive():
-            raise RuntimeError("O host já está ativo")
-        if mode not in ('wifi','usb'):raise ValueError('Modo inválido')
-        if mode=='usb':
+    def start(self, fps=30, longest=1024, audio=True, port=8090, mode="auto", monitor=None,
+              device_id=None, input_mode='touch', device_serial=None):
+        if any(worker.is_alive() for worker in self.workers) or (self.advertiser and self.advertiser.thread.is_alive()):
+            raise RuntimeError('Aguarde o encerramento da transmissão anterior')
+        if mode not in ('auto', 'wifi', 'usb') or input_mode not in ('touch', 'gamepad'):
+            raise ValueError('Modo inválido')
+        if input_mode == 'touch':
             from touchscreen import TouchScreen
-            self.pad=TouchScreen()
-        else:self.pad=XboxPad()
+            self.pad = TouchScreen()
+        else:
+            self.pad = XboxPad()
+        self.input_mode, self.monitor = input_mode, monitor
         self.stop_event.clear()
-        self.pin = f"{secrets.randbelow(1000000):06d}"
-        self.monitor=monitor
-        if mode=='wifi':
+        self.workers = []
+        if mode in ('auto', 'wifi'):
             self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.listener.bind(("0.0.0.0", port));self.listener.listen(1);self.listener.settimeout(0.5)
-            self.thread=threading.Thread(target=self.serve,args=(fps,longest,audio),daemon=True)
-        else:self.thread=threading.Thread(target=self.serve_usb,args=(fps,longest,audio,device_id),daemon=True)
-        self.thread.start()
+            self.listener.bind(('0.0.0.0', port))
+            self.listener.listen(2)
+            self.listener.settimeout(0.5)
+            self.workers.append(threading.Thread(target=self.serve, args=(fps, longest, audio), daemon=True))
+            from discovery import Advertiser
+            self.advertiser = Advertiser(self.identity['hostId'], self.listener.getsockname()[1], self.report)
+        if mode in ('auto', 'usb'):
+            self.workers.append(threading.Thread(target=self.serve_usb,
+                                args=(fps, longest, audio, device_id, device_serial), daemon=True))
+        self.thread = self.workers[0]
+        for worker in self.workers:
+            worker.start()
         return self.pin
 
-    def authenticate(self,connection):
+    def authenticate(self, connection):
         import hmac
         connection.settimeout(5)
-        connection.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
-        connection.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,32768)
-        nonce=secrets.token_bytes(32);connection.sendall(MAGIC+nonce)
-        if not hmac.compare_digest(read_exact(connection,32),proof(self.pin,nonce)):
-            connection.sendall(b"\x00");raise PermissionError('PIN incorreto; conexão recusada')
-        connection.sendall(b"\x01");connection.settimeout(3)
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
+        nonce = secrets.token_bytes(32)
+        connection.sendall(MAGIC + nonce)
+        if not hmac.compare_digest(read_exact(connection, 32), proof(self.pin, nonce)):
+            connection.sendall(b"\x00")
+            raise PermissionError('PIN incorreto; conexão recusada')
+        connection.sendall(b"\x01")
+        # New clients send their panel orientation immediately. Old clients still work.
+        import select
+        client_size = (1024, 768)
+        self.auth_client_display_id = None
+        if select.select([connection], [], [], 1)[0]:
+            kind, body = read_packet(connection)
+            if kind != CLIENT_INFO or len(body) > 512:
+                raise ValueError('Informações iniciais do iPad inválidas')
+            value = json.loads(body)
+            client_size = validate_display(value)
+            self.auth_client_display_id = display_id(value)
+        connection.settimeout(3)
+        return client_size
 
-    def serve_usb(self,fps,longest,audio,device_id):
-        from usbmux import list_devices,connect_device
-        selected_serial=None
+    def run_connection(self, connection, fps, longest, audio, transport):
+        # Both transports race for one owner; rejected attempts must never reset its input.
+        if not self.active_lock.acquire(blocking=False):
+            connection.close()
+            return
+        with self.connections_lock:
+            self.connections.add(connection)
+        try:
+            if self.stop_event.is_set():
+                return
+            client_size = self.authenticate(connection)
+            self.session = Session(connection, self.pad, fps, longest, audio, self.report,
+                                   self.input_mode, self.monitor, self.identity['hostId'], client_size, self.auth_client_display_id)
+            self.report('Conexão ' + transport + ' autenticada')
+            self.session.run()
+        finally:
+            connection.close()
+            with self.connections_lock:
+                self.connections.discard(connection)
+            self.session = None
+            self.pad.neutral()
+            self.active_lock.release()
+
+    def serve_usb(self, fps, longest, audio, device_id, selected_serial=None):
+        from usbmux import list_devices, connect_device
+        previous_error = None
         while not self.stop_event.is_set():
-            connection=None
             try:
-                devices=list_devices()
-                if selected_serial:devices=[d for d in devices if d.get('Properties',{}).get('SerialNumber')==selected_serial]
-                elif device_id is not None:devices=[d for d in devices if d['DeviceID']==device_id]
-                if len(devices)!=1:raise RuntimeError('Selecione um único iPad USB na lista e abra Aguardar PC no iPad')
-                selected_serial=devices[0].get('Properties',{}).get('SerialNumber')
-                connection=connect_device(devices[0]['DeviceID']);self.pending_connection=connection
-                self.authenticate(connection)
-                self.session=Session(connection,self.pad,fps,longest,audio,self.report,'touch',self.monitor)
-                self.session.run()
+                if self.active_lock.locked():
+                    self.stop_event.wait(1)
+                    continue
+                devices = list_devices()
+                if selected_serial:
+                    devices = [d for d in devices if d.get('Properties', {}).get('SerialNumber') == selected_serial]
+                elif device_id is not None:
+                    devices = [d for d in devices if d['DeviceID'] == device_id]
+                if not devices:
+                    raise RuntimeError('Nenhum iPad USB encontrado. Conecte o cabo e confirme Confiar.')
+                if len(devices) != 1:
+                    raise RuntimeError('Há vários aparelhos USB. Selecione o iPad na lista.')
+                selected_serial = devices[0].get('Properties', {}).get('SerialNumber')
+                connection = connect_device(devices[0]['DeviceID'])
+                previous_error = None
+                self.run_connection(connection, fps, longest, audio, 'USB')
             except Exception as exc:
-                if not self.stop_event.is_set():self.report('USB: '+str(exc))
-            finally:
-                if connection:connection.close()
-                self.pending_connection=None;self.session=None;self.pad.neutral()
-            self.stop_event.wait(1)
-        self.report('Monitor USB parado')
+                message = str(exc)
+                if not self.stop_event.is_set() and message != previous_error:
+                    logging.warning('USB connection: %s', message)
+                    self.report('USB: ' + message)
+                previous_error = message
+            self.stop_event.wait(2)
 
     def serve(self, fps, longest, audio):
-        import hmac
+        listener = self.listener
         while not self.stop_event.is_set():
             try:
-                connection, peer = self.listener.accept()
+                connection, peer = listener.accept()
             except socket.timeout:
                 continue
             except OSError:
                 break
             try:
-                self.pending_connection=connection
-                self.authenticate(connection)
-                self.session = Session(connection, self.pad, fps, longest, audio, self.report, 'gamepad',self.monitor)
-                self.session.run()
+                self.run_connection(connection, fps, longest, audio, 'Wi-Fi')
             except Exception as exc:
-                logging.exception("Session error")
-                self.report("Conexão encerrada: " + str(exc))
-            finally:
-                connection.close()
-                self.session = None
-                self.pending_connection=None
-                self.pad.neutral()
-        self.report("Transmissão parada")
+                logging.exception('Session error')
+                if not self.stop_event.is_set():
+                    self.report('Conexão encerrada: ' + str(exc))
 
     def stop(self):
         self.stop_event.set()
+        if self.advertiser:
+            self.advertiser.close()
+            if not self.advertiser.thread.is_alive():self.advertiser = None
         if self.session:
             self.session.close()
-        if self.pending_connection:
-            try:self.pending_connection.shutdown(socket.SHUT_RDWR)
-            except OSError:pass
+        with self.connections_lock:
+            for connection in list(self.connections):
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         if self.listener:
             self.listener.close()
+            self.listener = None
         if self.pad:
             self.pad.neutral()
 
@@ -322,6 +459,9 @@ def local_addresses():
 
 class App:
     def __init__(self,headless=False):
+        from settings import load_settings
+        self.headless = headless
+        self.settings = {'hostId':'0'*32, 'pin':'123456'} if headless else load_settings()
         from desktop import dpi_aware
         dpi_aware()
         self.root=tk.Tk();self.root.title("Shock Stream · Wi-Fi e monitor USB")
@@ -337,16 +477,18 @@ class App:
         self.body.bind('<Configure>',lambda e:canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.bind('<Configure>',lambda e:canvas.itemconfigure(window,width=e.width))
         self.root.bind_all('<MouseWheel>',lambda e:canvas.yview_scroll(-int(e.delta/120),'units'))
-        self.messages=queue.Queue();self.host=Host(self.messages.put);self.screens=[];self.usb_devices=[]
+        self.messages=queue.Queue();self.host=Host(self.messages.put, self.settings);self.screens=[];self.usb_devices=[]
         self.root.protocol("WM_DELETE_WINDOW",self.quit)
         style=ttk.Style();style.theme_use("clam")
         style.configure("TCombobox",fieldbackground="#243343",foreground="white",padding=6)
         self.label("SHOCK STREAM",25,"#4ce2bc",(16,4))
-        self.label("Wi-Fi para jogar · USB para usar o iPad como monitor touch",12,"#becbd8",(0,8))
+        self.label("Seu iPad como monitor touch por Wi-Fi ou USB",12,"#becbd8",(0,8))
         self.ip=self.label("IP do PC: "+local_addresses(),11,"white",3)
-        self.mode=ttk.Combobox(self.body,values=["Wi-Fi · Gamepad","USB · Monitor touch"],state="readonly",width=28)
-        self.mode.set("Wi-Fi · Gamepad");self.mode.pack(pady=5);self.mode.bind('<<ComboboxSelected>>',self.mode_changed)
-        self.hint=self.label("No iPad: Wi-Fi, IP do PC e PIN. Porta 8090.",11,"#a0b4c8",3)
+        self.mode=ttk.Combobox(self.body,values=["Automático · Wi-Fi + USB","Somente Wi-Fi","Somente USB"],state="readonly",width=30)
+        self.mode.current(max(0,min(2,self.settings.get('transport',0))));self.mode.pack(pady=5);self.mode.bind('<<ComboboxSelected>>',self.mode_changed)
+        self.control=ttk.Combobox(self.body,values=["Monitor touch · tela livre","Gamepad virtual na tela"],state="readonly",width=30)
+        self.control.current(max(0,min(1,self.settings.get('input',0))));self.control.pack(pady=3);self.control.bind('<<ComboboxSelected>>',self.mode_changed)
+        self.hint=self.label("Abra o app do iPad. Ele procura o PC automaticamente. PIN apenas no primeiro uso.",11,"#a0b4c8",3)
         self.pin=self.label("— — — — — —",28,"#4ce2bc",4)
         self.label("Tela transmitida",11,"#becbd8",2)
         screenrow=tk.Frame(self.body,bg="#101721");screenrow.pack(pady=4)
@@ -363,7 +505,9 @@ class App:
         actions=tk.Frame(self.body,bg="#101721");actions.pack(pady=7)
         self.start_button=self.button(actions,"Iniciar",self.start,True);self.start_button.pack(side='left',padx=8)
         self.button(actions,"Parar",self.stop).pack(side='left',padx=8)
-        self.state=self.label("Escolha o modo e prepare os drivers abaixo na primeira utilização.",11,"#a0b4c8",8)
+        self.auto=tk.BooleanVar(value=self.settings.get('autoStart',True))
+        tk.Checkbutton(self.body,text="Ficar pronto para conectar ao abrir este programa",variable=self.auto,command=self.save_preferences,bg="#101721",fg="white",selectcolor="#243343",activebackground="#101721").pack(pady=3)
+        self.state=self.label("Prepare o suporte Apple para USB e o monitor virtual para preencher toda a tela.",11,"#a0b4c8",8)
         self.label("Preparação pelo aplicativo",13,"#4ce2bc",5)
         drivers=tk.Frame(self.body,bg="#101721");drivers.pack(pady=5)
         self.button(drivers,"Instalar gamepad",self.install_gamepad).pack(side='left',padx=5)
@@ -373,7 +517,8 @@ class App:
         self.button(display,"Estender área de trabalho",self.extend).pack(side='left',padx=5)
         self.button(display,"Remover monitor virtual",self.remove_monitor).pack(side='left',padx=5)
         self.label("Instaladores incluídos · suporte Apple preparado pelo Windows · autorização do Windows quando necessária",9,"#a0b4c8",6)
-        self.refresh_screens();self.root.after(100,self.poll)
+        self.mode_changed();self.root.after(100,self.poll)
+        if not headless and self.auto.get():self.root.after(500,self.start)
 
     def label(self,text,size,color,pady):
         label=tk.Label(self.body,text=text,bg="#101721",fg=color,font=("Segoe UI",size),wraplength=680)
@@ -384,11 +529,20 @@ class App:
 
     def mode_changed(self,event=None):
         if self.host.thread and self.host.thread.is_alive():self.stop()
-        usb=self.mode.current()==1
-        if usb:self.usbrow.pack(after=self.screen.master,pady=4);self.refresh_usb()
+        usb=self.mode.current()!=1
+        if usb:
+            self.usbrow.pack(after=self.screen.master,pady=4)
+            if not self.headless:self.refresh_usb()
         else:self.usbrow.pack_forget()
-        self.hint.config(text="No iPad: USB, PIN do PC e Aguardar PC. Conecte o cabo e confirme Confiar." if usb else "No iPad: Wi-Fi, IP do PC e PIN. Porta 8090.")
+        self.hint.config(text="Abra o app no iPad. PIN uma vez; reconexão automática depois. USB: confirme Confiar." if usb else "Mesma rede Wi-Fi. O iPad localiza este PC sem digitar IP. PIN no primeiro uso.")
         self.refresh_screens()
+
+    def save_preferences(self):
+        if self.headless:return
+        from settings import save_settings
+        self.settings.update(transport=self.mode.current(),input=self.control.current(),autoStart=self.auto.get())
+        if self.screen.current()>=0:self.settings['screenDevice']=self.screens[self.screen.current()]['device']
+        save_settings(self.settings)
 
     def refresh_screens(self):
         if self.host.thread and self.host.thread.is_alive():
@@ -399,7 +553,8 @@ class App:
             self.screen['values']=[f"{'Monitor virtual' if m['virtual'] else 'Tela'} {i+1} · {m['width']}×{m['height']} · {m['adapter']}" for i,m in enumerate(self.screens)]
             if self.screens:
                 virtual=next((i for i,m in enumerate(self.screens) if m['virtual']),None)
-                choice=virtual if self.mode.current()==1 and virtual is not None else max(0,min(previous,len(self.screens)-1))
+                remembered=next((i for i,m in enumerate(self.screens) if m['device']==self.settings.get('screenDevice')),None)
+                choice=remembered if remembered is not None else virtual if self.control.current()==0 and virtual is not None else max(0,min(previous,len(self.screens)-1))
                 self.screen.current(choice)
         except Exception as exc:self.state.config(text=str(exc))
 
@@ -412,9 +567,10 @@ class App:
                 devices=list_devices()
                 def apply():
                     self.usb_devices=devices
-                    self.device['values']=["Apple USB · "+d.get('Properties',{}).get('SerialNumber',str(d['DeviceID'])) for d in devices]
-                    if devices:self.device.current(0);self.state.config(text="iPad detectado. Abra USB no app do iPad e informe o PIN.")
-                    else:self.state.config(text="Nenhum iPad USB encontrado. Conecte o cabo e confirme Confiar.")
+                    self.device['values']=['Automático · único iPad conectado']+["Apple USB · "+d.get('Properties',{}).get('SerialNumber',str(d['DeviceID'])) for d in devices]
+                    self.device.current(0)
+                    if devices:self.state.config(text="iPad detectado. Abra o app no iPad; informe o PIN no primeiro uso.")
+                    else:self.state.config(text="USB aguardando cabo/Confiar. A descoberta Wi-Fi continua disponível no modo automático.")
                 self.messages.put(apply)
             except Exception as exc:self.messages.put(str(exc))
         threading.Thread(target=work,daemon=True).start()
@@ -424,7 +580,7 @@ class App:
         def work():
             try:
                 result=action()
-                self.messages.put("Etapa concluída."+(" Reinicie o PC para concluir a instalação." if result in (3010,1641) else ""))
+                self.messages.put(result if isinstance(result,str) else "Etapa concluída."+(" Reinicie o PC para concluir a instalação." if result in (3010,1641) else ""))
                 if refresh:self.messages.put(self.refresh_screens)
             except Exception as exc:self.messages.put(str(exc))
         threading.Thread(target=work,daemon=True).start()
@@ -453,8 +609,13 @@ class App:
         self.background("O Windows solicitará autorização para remover o monitor virtual…",lambda:monitor_driver(True),True)
 
     def prepare_usb(self):
+        self.stop()
         from setup_manager import prepare_apple_usb
-        self.background("Preparando o suporte USB Apple pelo Windows. Internet necessária na primeira instalação…",prepare_apple_usb)
+        def prepare():
+            result=prepare_apple_usb()
+            self.messages.put(self.refresh_usb)
+            return result
+        self.background("Preparando o suporte USB Apple pelo Windows. Internet necessária na primeira instalação…",prepare)
 
     def extend(self):
         self.stop()
@@ -464,14 +625,15 @@ class App:
     def start(self):
         try:
             if self.screen.current()<0:raise RuntimeError('Selecione uma tela para transmitir')
-            usb=self.mode.current()==1;device_id=None
-            if usb:
-                if self.device.current()<0:raise RuntimeError('Clique Detectar iPad e selecione o aparelho USB')
-                device_id=self.usb_devices[self.device.current()]['DeviceID']
-            pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode='usb' if usb else 'wifi',monitor=self.screens[self.screen.current()],device_id=device_id)
+            device_id=device_serial=None
+            if self.device.current()>0:
+                device=self.usb_devices[self.device.current()-1]
+                device_id=device['DeviceID'];device_serial=device.get('Properties',{}).get('SerialNumber')
+            pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode=('auto','wifi','usb')[self.mode.current()],monitor=self.screens[self.screen.current()],device_id=device_id,device_serial=device_serial,input_mode='touch' if self.control.current()==0 else 'gamepad')
+            self.save_preferences()
             self.pin.config(text=' '.join(pin));self.start_button.config(state='disabled')
             self.screen.config(state='disabled');self.device.config(state='disabled')
-            self.state.config(text="USB pronto: informe este PIN no iPad e toque Aguardar PC." if usb else "Wi-Fi pronto: conecte o iPad com o IP e este PIN.")
+            self.state.config(text="Pronto. Abra o app no iPad e informe o PIN uma vez. O monitor virtual preenche 1024×768.")
         except Exception as exc:self.host.stop();messagebox.showerror("Não foi possível iniciar",str(exc))
 
     def stop(self):
@@ -496,6 +658,8 @@ def main():
         import av
         import numpy as np
         import mss, soundcard, importlib.util, ctypes
+        from discovery import service_info
+        assert service_info('0'*32,8090,['192.168.1.2']).port==8090
         # Importing vgamepad itself connects to the bus, which is absent on build runners.
         spec = importlib.util.find_spec('vgamepad')
         assert spec and spec.submodule_search_locations
@@ -515,7 +679,7 @@ def main():
         encoded = b"".join(bytes(p) for p in encoder.encode(image.reformat(format="yuv420p")))
         assert b"\x00\x00\x00\x01" in encoded
         app=App(headless=True);app.root.update_idletasks()
-        assert len(app.mode['values'])==2
+        assert len(app.mode['values'])==3 and len(app.control['values'])==2
         app.quit()
         print("PASS: bundled libraries, H.264 baseline encoder, immediate Annex-B output")
         return

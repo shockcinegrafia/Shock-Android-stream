@@ -1,56 +1,55 @@
-# Shock Stream 0.2.0 · Wi-Fi e monitor touch USB
+# Shock Stream 0.3.0 · monitor touch e gamepad
 
-Um programa no Windows 11 x64 gerencia os dois modos. O cliente nativo do iPad mini 1 / iOS 9 ARMv7 usa seu ambiente de jailbreak e instalação pelo Filza.
+O programa Windows 11 transmite a área de trabalho para o iPad mini 1, iOS 9 / ARMv7. O IPA usa a instalação por Filza no ambiente com jailbreak já utilizado no projeto.
 
-## Preparação pelo app do PC
+## Começar
 
-Descompacte o pacote Windows, mantendo ShockStream.exe e _internal juntos. Instale o IPA 0.2 no iPad pelo Filza.
+1. Atualize **os dois aplicativos**. Descompacte o ZIP do Windows mantendo ShockStream.exe e _internal juntos; instale o novo IPA no iPad.
+2. Abra o programa no PC. O padrão é **Automático · Wi-Fi + USB** com **Monitor touch · tela livre**. Ele fica pronto ao abrir; essa opção pode ser desmarcada.
+3. Abra o app no iPad. Na mesma rede Wi-Fi, ele procura o PC e preenche o endereço automaticamente. Não é necessário reservar IP fixo no roteador.
+4. Informe o PIN exibido no PC uma vez e toque **Conectar / emparelhar**. O PC mantém sua identidade/PIN entre aberturas; o iPad salva o pareamento apenas após receber uma sessão autenticada válida.
+5. Nas próximas aberturas, o iPad tenta o PC conhecido pelo Wi-Fi e pelo USB. A primeira conexão aceita ocupa a sessão. Ao perder a conexão, procura novamente. Para usar somente o cabo ou somente Wi-Fi, selecione esse transporte nos dois aplicativos.
 
-Abra ShockStream.exe. Na seção Preparação pelo aplicativo:
+O app do PC precisa estar aberto. No iPad, o app precisa estar em primeiro plano; ligar o cabo sozinho **não abre automaticamente o app do iOS**. A busca e conexão automáticas acontecem com os apps abertos, após o primeiro pareamento. Ao voltar pelo botão Home, o iPad fecha a conexão; ao reabrir, retoma a busca. Não há serviço ADB.
 
-- **Instalar gamepad** abre o instalador oficial ViGEmBus incluído. É necessário apenas para o modo Wi-Fi/gamepad.
-- **Criar segundo monitor** instala o driver de monitor virtual incluído, com autorização do Windows, e tenta estender a área de trabalho. O helper usa SetupAPI/NewDev para criar somente Root\MttVDD. Não instala drivers em modo de teste nem muda a verificação de assinatura do Windows.
-- **Preparar USB Apple** verifica o serviço USB. Se faltar, o Windows Package Manager instala o iTunes/suporte Apple oficial, com o instalador interativo. Precisa de internet nesta primeira preparação. Os binários proprietários da Apple não são redistribuídos dentro do ZIP.
-- **Estender área de trabalho** permite solicitar a extensão novamente. **Remover monitor virtual** remove somente o dispositivo Root\MttVDD com autorização do Windows.
+Se a rede bloquear multicast/Bonjour, existe o campo de IP manual. Permita o aplicativo na rede privada do Firewall do Windows quando solicitado: vídeo/controles usam TCP 8090; descoberta Bonjour usa UDP 5353. O programa não altera o Firewall sozinho. A descoberta anuncia identidade/nome/endereço/porta, nunca o PIN. Na troca de IP, o host reanuncia as interfaces e o iPad busca os endereços atuais.
 
-A autorização administrativa ocorre apenas quando você aciona um instalador. Os testes e o build não instalam drivers nem mudam monitores no computador. O pacote inclui o driver de tela x64 25.7.23, seu catálogo assinado e o instalador ViGEmBus 1.22.0. Downloads do build têm hashes fixos. As assinaturas dos pacotes são verificadas no GitHub. O helper e o executável próprios não têm certificado comercial.
+## Touch sem cobrir a imagem
 
-Se já houver uma configuração C:\VirtualDisplayDriver\vdd_settings.xml, ela é preservada. Em uma instalação nova, o padrão oferece 1024×768 e 768×1024 a 60 Hz, com um monitor. O Windows pode piscar ao instalar/remover um monitor. Não remova o driver enquanto a sessão estiver em uso.
+**Monitor touch · tela livre** funciona tanto no Wi-Fi quanto no USB e não precisa do ViGEmBus. Não há botões nem gamepad sobrepostos. Toques curtos, arrastes, up e cancel usam InjectTouchInput nativo no Windows, com até dez contatos. A coordenada é calculada a partir da imagem exibida e do retângulo real da tela escolhida, inclusive telas com posição negativa.
 
-## USB · Monitor touch
+Para sair, pressione Home no iPad ou **Parar** no PC. Rotação, desconexão e perda de atualização cancelam os contatos para evitar dedos presos. Programas elevados e sistemas anticheat podem impor limites ao input injetado.
 
-1. Conecte o cabo e confirme Confiar neste computador no iPad, se aparecer.
-2. No PC, selecione **USB · Monitor touch** e clique **Detectar iPad**. Selecione o aparelho USB.
-3. Se quiser uma segunda área de trabalho, use **Criar segundo monitor** e escolha **Monitor virtual** em Tela transmitida. Para espelhar, escolha uma tela física. O app também oferece Atualizar e Estender área de trabalho.
-4. Clique **Iniciar**, observe o PIN e, no iPad, escolha **USB · Touch**, informe esse PIN e toque **Aguardar PC pelo USB**. Não precisa informar IP nem usar a mesma rede Wi-Fi.
-5. O iPad mostra a tela escolhida, sem gamepad nem controles sobrepostos. Toques, arrastes, soltura e cancelamento são enviados à API nativa InjectTouchInput do Windows, com até dez contatos. Para sair, use o botão Home do iPad ou Parar no PC. Os aplicativos do Windows precisam aceitar o tipo de gesto; um sistema anticheat ou aplicativo elevado pode limitar input injetado.
+Para jogar com controle na tela, escolha **Gamepad virtual na tela** no PC. O iPad recebe esse modo automaticamente. O botão **Instalar gamepad** abre o instalador oficial ViGEmBus incluído. O controle oferece dois sticks, direcional, A/B/X/Y, ombros/gatilhos, L3/R3 e START/BACK. Somente uma sessão controla o PC por vez.
 
-O encaminhamento USB usa diretamente o protocolo Apple usbmux no PC, sem executar um iproxy separado. O app do iPad abre o receptor somente no loopback 127.0.0.1:8091. O suporte Apple do PC lista aparelhos USB, abre esse canal e transporta vídeo/áudio/controles. A porta local do serviço Apple é 27015.
+## Toda a tela do iPad
 
-As coordenadas usam a proporção e o retângulo de vídeo efetivamente exibido. Toques iniciados nas barras fora da imagem são ignorados. O host converte para pixels e posição global do monitor selecionado, inclusive em telas à esquerda/acima da principal. Movimentos simultâneos são agrupados em um frame de touch; up usa as mesmas coordenadas do último update, como exige o Windows. Rotação, saída do aplicativo e desconexão cancelam contatos para evitar dedos presos.
+Use **Criar segundo monitor** no programa Windows e selecione **Monitor virtual** em Tela transmitida. Em uma configuração nova, o driver incluído oferece 1024×768 e 768×1024 a 60 Hz. O host ajusta somente esse monitor virtual à orientação informada pelo iPad, testa o modo antes de aplicar e captura a resolução nativa do tablet. Não aumenta a transmissão além de 1024×768 / 768×1024.
 
-Isso é uma tela transmitida por software sobre USB, não uma entrada de vídeo física HDMI. O segundo monitor é criado pelo driver do Windows. Instalação física do driver, pareamento Apple, encaminhamento USB no iOS 9 e comportamento de gestos ainda precisam ser testados com o cabo e o iPad reais.
+A tela física do PC conserva sua configuração. Se você escolher espelhar uma tela física de proporção diferente, a imagem mantém a proporção e pode ter barras. Para ocupar a tela inteira sem distorção, escolha o monitor virtual de proporção 4:3. É possível arrastar janelas para ele no Windows, como em um segundo monitor.
 
-## Wi-Fi · Gamepad
+A troca de orientação reinicia o encoder com novos SPS/PPS H.264. A confirmação de geometria identifica a solicitação mais recente do iPad antes de reativar touch. Mudanças de posição/resolução feitas no Windows também são detectadas. Qualidade reduzida de 800/640 px e 20/15 FPS continuam disponíveis; o padrão é 1024 px e 30 FPS.
 
-Coloque os dois na mesma rede. Escolha Wi-Fi no PC, selecione a tela e clique Iniciar. No iPad, escolha Wi-Fi, informe IP e PIN. A porta é 8090; permita a rede privada no Firewall se solicitado. O host não muda o Firewall sozinho.
+O driver exige autorização do Windows para instalar/remover. O helper gerencia somente Root\MttVDD; não modifica a imposição de assinatura de drivers. Uma configuração de driver já existente é preservada: se não oferecer as duas resoluções, o programa informa e mantém a captura proporcional. O botão **Estender área de trabalho** permite solicitar a extensão novamente.
 
-O gamepad virtual tem dois sticks, direcional, A/B/X/Y, LB/RB, LT/RT, L3/R3, START e BACK. Envia estados completos ao controle Xbox/XInput virtual. O ViGEmBus permanece instalado; não há ADB. Só uma sessão/modo pode estar ativo por vez.
+## USB
 
-## Vídeo, áudio e limites
+Use um cabo de dados e confirme **Confiar neste computador** no iPad, se aparecer. No primeiro uso, **Preparar USB Apple** verifica o serviço; se faltar, o Windows Package Manager abre a instalação oficial do iTunes/suporte Apple. Precisa de internet nessa preparação. O programa verifica novamente o serviço após instalar, distingue serviço ausente de aparelho ausente e atualiza a lista. Os binários proprietários da Apple não são redistribuídos no ZIP.
 
-H.264 Baseline por CPU/libx264, sem B-frames, resolução máxima padrão de 1024 px e alvo de 30 FPS. A captura mantém apenas o frame bruto mais recente. O host espera a confirmação de decodificação/apresentação antes de codificar outro frame, preservando referências H.264. O iPad usa VideoToolbox e uma camada nativa. Há opções 800/640 px e 20/15 FPS.
+No modo automático, um único aparelho conectado é selecionado sem clicar em Detectar. Se houver vários aparelhos Apple, pare a transmissão, atualize a lista e selecione o iPad desejado. A identidade serial acompanha mudanças de DeviceID ao reconectar.
 
-Áudio do dispositivo de saída padrão, estéreo PCM 16-bit/44.1 kHz, com filas limitadas. Pode ser desativado. Se falhar, o vídeo continua e o PC mostra a mensagem. Ainda não há encoder por GPU, rumble ou lista de jogos. Conteúdo protegido pode aparecer preto.
+O cliente usbmux aceita plist ListDevices, eventos Listen/Attached e protocolo binário v0 usado por serviços Apple antigos. O serviço local do PC é 127.0.0.1:27015; o app do iPad abre 127.0.0.1:8091. Não há iproxy separado. No primeiro pareamento exclusivamente por cabo, informe o PIN no iPad e toque Conectar; depois o listener abre automaticamente com o PIN salvo.
 
-Ambos os modos autenticam um desafio HMAC com PIN/nonce. A transmissão não é criptografada: Wi-Fi deve ser uma rede de confiança. Não exponha 8090 à internet. USB usa um canal do serviço local Apple. A latência real não foi medida no iPad físico.
+Se continuar sem reconhecimento, confira o cabo, Confiar e o Apple Mobile Device Service. O log em %LOCALAPPDATA%/ShockStream/host.log e a mensagem da interface ajudam a distinguir serviço, aparelho e porta do app. Nenhum diagnóstico publica o PIN ou número de série.
 
-## Build e testes
+## Vídeo e build
 
-O workflow Build Shock Stream PC and iPad gera o pacote Windows e o IPA. Windows inclui Python/bibliotecas/driver setup; não executa instaladores no runner. iPad usa Theos/Linux + SDK 9.2, deployment 9.0 e ARMv7. CFBundleVersion cresce com as execuções. A assinatura ldid tem seus hashes de código verificados; depende de instalação compatível com jailbreak, não de provisionamento Apple.
+H.264 Constrained Baseline por CPU/libx264, sem B-frames, com VideoToolbox no iPad. A captura sobrescreve um único frame bruto. O host espera ACK de decodificação/apresentação antes de codificar o próximo; não descarta pacotes H.264 dependentes nem acumula uma fila de frames atrasados. Áudio de loopback WASAPI, PCM estéreo 44,1 kHz, usa filas limitadas e pode ser desativado.
 
-Testes automatizados cobrem H.264, pacotes fragmentados/limites, estado e liberação do gamepad, assinatura, protocolo USB/ordem de bytes, ABI Windows, multitouch, soltura final, cancelamento, agrupamento de movimentos e coordenadas de múltiplos monitores. USB e touch são simulados nos testes: eles não conectam a aparelhos nem injetam eventos reais no desktop.
+Wi-Fi autentica desafio HMAC/PIN mas não criptografa a transmissão; use uma rede local de confiança. O serviço não deve ser exposto à internet. Não há encoder GPU, rumble ou catálogo de jogos nesta versão.
 
-Para desenvolvimento: instale windows/requirements.txt em ambiente isolado e execute scripts/install_gamepad.py. Depois execute python -m unittest discover -s pc-ipad/tests -v na raiz. O script copia Python/DLL de origem verificada sem executar o instalador do vgamepad.
+O GitHub Actions compila Windows x64 e IPA iOS 9 ARMv7, roda testes de protocolo/codec/input/túneis simulados e verifica o executável empacotado sem instalar drivers ou injetar touch real no runner. O IPA mantém o bundle ID e CFBundleVersion crescente; a assinatura ldid tem hashes de código verificados e depende do ambiente com jailbreak, sem provisionamento Apple. Drivers oficiais incluídos têm downloads fixados por hash e assinatura verificada no build. O executável/helper próprios não têm certificado comercial.
 
-Log: %LOCALAPPDATA%/ShockStream/host.log. Dependências e licenças: THIRD_PARTY.md.
+O usuário confirmou o streaming Wi-Fi da versão anterior. Descoberta, USB, rotação e touch desta versão ainda requerem teste com o iPad e cabo físicos; testes automatizados e build não substituem essa validação. A latência física não foi medida.
+
+Para desenvolvimento, instale windows/requirements.txt e execute scripts/install_gamepad.py em ambiente isolado. Rode python -m unittest discover -s pc-ipad/tests -v. Dependências e licenças acompanham o pacote em THIRD_PARTY.md e licenses/.
