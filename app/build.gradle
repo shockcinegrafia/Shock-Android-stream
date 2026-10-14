@@ -1,3 +1,21 @@
 plugins { id 'com.android.application' }
 android { namespace 'com.shock.stream'; compileSdk 35
  defaultConfig { applicationId 'com.shock.stream'; minSdk 26; targetSdk 34; versionCode 2; versionName '0.2.1' } }
+
+android {
+ signingConfigs {
+  stableDebug {
+   if (System.getenv('SHOCK_KEYSTORE_PATH')) {
+    storeFile file(System.getenv('SHOCK_KEYSTORE_PATH'))
+    storePassword System.getenv('SHOCK_KEYSTORE_PASSWORD')
+    keyAlias System.getenv('SHOCK_KEY_ALIAS')
+    keyPassword System.getenv('SHOCK_KEY_PASSWORD')
+   }
+  }
+ }
+ buildTypes {
+  debug {
+   if (System.getenv('SHOCK_KEYSTORE_PATH')) signingConfig signingConfigs.stableDebug
+  }
+ }
+}
