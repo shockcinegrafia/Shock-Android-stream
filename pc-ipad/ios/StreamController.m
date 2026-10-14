@@ -119,9 +119,7 @@
 - (void)modeChanged {
     [self disconnect];BOOL usb=self.mode.selectedSegmentIndex==1;self.hostField.hidden=usb;
     [self.connectButton setTitle:usb?@"Aguardar PC pelo USB":@"Conectar e jogar" forState:UIControlStateNormal];
-    self.status.text=usb?@"Conecte o cabo, informe o PIN do PC e aguarde.
-O toque controla a tela selecionada no Windows.":@"Informe o IP e o PIN do PC.
-Gamepad virtual pela rede Wi-Fi.";
+    self.status.text=usb?@"Conecte o cabo, informe o PIN do PC e aguarde.\nO toque controla a tela selecionada no Windows.":@"Informe o IP e o PIN do PC.\nGamepad virtual pela rede Wi-Fi.";
 }
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
     [self.touchSurface reset];[self.pad neutral];

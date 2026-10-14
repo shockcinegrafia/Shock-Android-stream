@@ -11,8 +11,8 @@ PyInstaller.__main__.run([
     '--noconfirm','--clean','--onedir','--windowed','--name','ShockStream',
     '--collect-all','av','--collect-all','soundcard','--hidden-import','_cffi_backend',
     '--add-binary',str(dll)+';vgamepad/win/vigem/client/x64',
-    '--add-binary','build/DriverSetup.exe;.',
-    '--add-data','pc-ipad/drivers;drivers',
+    '--add-binary',str(Path('build/DriverSetup.exe').resolve())+';.',
+    '--add-data',str(Path('pc-ipad/drivers').resolve())+';drivers',
     '--distpath','dist','--workpath','build/pc','--specpath','build/pc',
     'pc-ipad/windows/host.py'
 ])

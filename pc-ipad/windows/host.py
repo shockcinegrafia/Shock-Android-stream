@@ -318,11 +318,22 @@ def local_addresses():
 
 
 class App:
-    def __init__(self):
+    def __init__(self,headless=False):
         from desktop import dpi_aware
         dpi_aware()
         self.root=tk.Tk();self.root.title("Shock Stream · Wi-Fi e monitor USB")
-        self.root.geometry("760x740");self.root.minsize(700,700);self.root.configure(bg="#101721")
+        if headless:self.root.withdraw()
+        height=min(740,self.root.winfo_screenheight()-100)
+        self.root.geometry(f"760x{height}");self.root.minsize(700,560);self.root.configure(bg="#101721")
+        canvas=tk.Canvas(self.root,bg="#101721",highlightthickness=0)
+        scrollbar=tk.Scrollbar(self.root,orient='vertical',command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right',fill='y');canvas.pack(side='left',fill='both',expand=True)
+        self.body=tk.Frame(canvas,bg="#101721")
+        window=canvas.create_window((0,0),window=self.body,anchor='nw')
+        self.body.bind('<Configure>',lambda e:canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>',lambda e:canvas.itemconfigure(window,width=e.width))
+        self.root.bind_all('<MouseWheel>',lambda e:canvas.yview_scroll(-int(e.delta/120),'units'))
         self.messages=queue.Queue();self.host=Host(self.messages.put);self.screens=[];self.usb_devices=[]
         self.root.protocol("WM_DELETE_WINDOW",self.quit)
         style=ttk.Style();style.theme_use("clam")
@@ -330,39 +341,39 @@ class App:
         self.label("SHOCK STREAM",25,"#4ce2bc",(16,4))
         self.label("Wi-Fi para jogar · USB para usar o iPad como monitor touch",12,"#becbd8",(0,8))
         self.ip=self.label("IP do PC: "+local_addresses(),11,"white",3)
-        self.mode=ttk.Combobox(self.root,values=["Wi-Fi · Gamepad","USB · Monitor touch"],state="readonly",width=28)
+        self.mode=ttk.Combobox(self.body,values=["Wi-Fi · Gamepad","USB · Monitor touch"],state="readonly",width=28)
         self.mode.set("Wi-Fi · Gamepad");self.mode.pack(pady=5);self.mode.bind('<<ComboboxSelected>>',self.mode_changed)
         self.hint=self.label("No iPad: Wi-Fi, IP do PC e PIN. Porta 8090.",11,"#a0b4c8",3)
         self.pin=self.label("— — — — — —",28,"#4ce2bc",4)
         self.label("Tela transmitida",11,"#becbd8",2)
-        screenrow=tk.Frame(self.root,bg="#101721");screenrow.pack(pady=4)
+        screenrow=tk.Frame(self.body,bg="#101721");screenrow.pack(pady=4)
         self.screen=ttk.Combobox(screenrow,state="readonly",width=62);self.screen.pack(side='left',padx=4)
         self.button(screenrow,"Atualizar",self.refresh_screens).pack(side='left')
-        self.usbrow=tk.Frame(self.root,bg="#101721")
+        self.usbrow=tk.Frame(self.body,bg="#101721")
         self.device=ttk.Combobox(self.usbrow,state="readonly",width=50);self.device.pack(side='left',padx=4)
         self.button(self.usbrow,"Detectar iPad",self.refresh_usb).pack(side='left')
-        options=tk.Frame(self.root,bg="#101721");options.pack(pady=6)
+        options=tk.Frame(self.body,bg="#101721");options.pack(pady=6)
         self.fps=ttk.Combobox(options,values=["30 FPS","20 FPS","15 FPS"],width=10,state="readonly");self.fps.set("30 FPS");self.fps.pack(side='left',padx=5)
         self.size=ttk.Combobox(options,values=["1024 px","800 px","640 px"],width=10,state="readonly");self.size.set("1024 px");self.size.pack(side='left',padx=5)
         self.audio=tk.BooleanVar(value=True)
         tk.Checkbutton(options,text="Áudio do PC",variable=self.audio,bg="#101721",fg="white",selectcolor="#243343",activebackground="#101721").pack(side='left',padx=8)
-        actions=tk.Frame(self.root,bg="#101721");actions.pack(pady=7)
+        actions=tk.Frame(self.body,bg="#101721");actions.pack(pady=7)
         self.start_button=self.button(actions,"Iniciar",self.start,True);self.start_button.pack(side='left',padx=8)
         self.button(actions,"Parar",self.stop).pack(side='left',padx=8)
         self.state=self.label("Escolha o modo e prepare os drivers abaixo na primeira utilização.",11,"#a0b4c8",8)
         self.label("Preparação pelo aplicativo",13,"#4ce2bc",5)
-        drivers=tk.Frame(self.root,bg="#101721");drivers.pack(pady=5)
+        drivers=tk.Frame(self.body,bg="#101721");drivers.pack(pady=5)
         self.button(drivers,"Instalar gamepad",self.install_gamepad).pack(side='left',padx=5)
         self.button(drivers,"Criar segundo monitor",self.install_monitor).pack(side='left',padx=5)
         self.button(drivers,"Preparar USB Apple",self.prepare_usb).pack(side='left',padx=5)
-        display=tk.Frame(self.root,bg="#101721");display.pack(pady=5)
+        display=tk.Frame(self.body,bg="#101721");display.pack(pady=5)
         self.button(display,"Estender área de trabalho",self.extend).pack(side='left',padx=5)
         self.button(display,"Remover monitor virtual",self.remove_monitor).pack(side='left',padx=5)
         self.label("Instaladores incluídos · suporte Apple preparado pelo Windows · autorização do Windows quando necessária",9,"#a0b4c8",6)
         self.refresh_screens();self.root.after(100,self.poll)
 
     def label(self,text,size,color,pady):
-        label=tk.Label(self.root,text=text,bg="#101721",fg=color,font=("Segoe UI",size),wraplength=710)
+        label=tk.Label(self.body,text=text,bg="#101721",fg=color,font=("Segoe UI",size),wraplength=680)
         label.pack(pady=pady);return label
 
     def button(self,parent,text,command,accent=False):
@@ -491,6 +502,9 @@ def main():
         image = av.VideoFrame.from_ndarray(np.zeros((72, 128, 3), dtype=np.uint8), format="rgb24")
         encoded = b"".join(bytes(p) for p in encoder.encode(image.reformat(format="yuv420p")))
         assert b"\x00\x00\x00\x01" in encoded
+        app=App(headless=True);app.root.update_idletasks()
+        assert len(app.mode['values'])==2
+        app.quit()
         print("PASS: bundled libraries, H.264 baseline encoder, immediate Annex-B output")
         return
     folder = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ShockStream"
