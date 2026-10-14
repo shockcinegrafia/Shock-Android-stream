@@ -20,9 +20,23 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Restore persistent signing key (when configured)
+        env:
+          KEYSTORE_B64: ${{ secrets.SHOCK_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf "%s" "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/shock-signing.jks"
+            echo "SHOCK_KEYSTORE_PATH=$RUNNER_TEMP/shock-signing.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No persistent signing key configured; debug APK may not update an installed APK signed with another key."
+          fi
       - name: Build debug APK
+        env:
+          SHOCK_KEYSTORE_PASSWORD: ${{ secrets.SHOCK_KEYSTORE_PASSWORD }}
+          SHOCK_KEY_ALIAS: ${{ secrets.SHOCK_KEY_ALIAS }}
+          SHOCK_KEY_PASSWORD: ${{ secrets.SHOCK_KEY_PASSWORD }}
         run: gradle :app:assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: ShockAndroidStream-v0.1-debug
+          name: ShockAndroidStream-v0.2.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
