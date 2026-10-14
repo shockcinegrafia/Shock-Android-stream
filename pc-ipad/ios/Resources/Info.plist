@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.shock.stream.ipad</string>
+<key>CFBundleName</key><string>ShockStream</string>
+<key>CFBundleDisplayName</key><string>Shock Stream</string>
+<key>CFBundleExecutable</key><string>ShockStream</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>MinimumOSVersion</key><string>9.0</string>
+<key>LSRequiresIPhoneOS</key><true/>
+<key>UIDeviceFamily</key><array><integer>2</integer></array>
+<key>UIRequiresFullScreen</key><true/>
+<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>UIStatusBarHidden</key><true/>
+<key>UIViewControllerBasedStatusBarAppearance</key><false/>
+<key>CFBundleIcons</key><dict><key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconFiles</key><array><string>Icon-76</string><string>Icon-76@2x</string></array></dict></dict>
+<key>UILaunchImages</key><array><dict><key>UILaunchImageName</key><string>LaunchPortrait</string><key>UILaunchImageOrientation</key><string>Portrait</string><key>UILaunchImageSize</key><string>{768, 1024}</string><key>UILaunchImageMinimumOSVersion</key><string>9.0</string></dict><dict><key>UILaunchImageName</key><string>LaunchLandscape</string><key>UILaunchImageOrientation</key><string>Landscape</string><key>UILaunchImageSize</key><string>{1024, 768}</string><key>UILaunchImageMinimumOSVersion</key><string>9.0</string></dict></array>
+</dict></plist>

@@ -1,0 +1,106 @@
+name: Build Shock Stream PC and iPad
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['pc-ipad/**', '.github/workflows/pc-ipad.yml']
+  push:
+    branches: [main]
+    paths: ['pc-ipad/**', '.github/workflows/pc-ipad.yml']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      VGAMEPAD_SKIP_VIGEMBUS_INSTALL: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated build dependencies
+        run: python -m pip install -r pc-ipad/windows/requirements.txt
+      - name: Test protocol, H.264 and gamepad state
+        run: python -m unittest discover -s pc-ipad/tests -v
+      - name: Build Windows program
+        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name ShockStream --collect-all av --collect-all soundcard --collect-all vgamepad --hidden-import _cffi_backend --distpath dist --workpath build/pc --specpath build/pc pc-ipad/windows/host.py
+      - name: Verify packaged program dependencies
+        run: |
+          python pc-ipad/windows/host.py --self-test
+          $env:PYTHONPATH=''
+          $process = Start-Process -FilePath './dist/ShockStream/ShockStream.exe' -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw 'Packaged self-test failed' }
+      - name: Include usage and dependency notices
+        run: |
+          Copy-Item pc-ipad/README.md dist/ShockStream/LEIA-ME.md
+          Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
+          python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
+          Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-Windows-x64
+          path: dist/ShockStream-Windows-x64.zip
+          if-no-files-found: error
+  ipad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install legacy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bash curl git make perl unzip zip xz-utils file fakeroot dpkg libtinfo6 ca-certificates bzip2
+      - name: Install proven iOS 9 ARMv7 toolchain
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/toolchain" "$THEOS/sdks" dist
+          curl -fL --retry 3 https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz -o dist/toolchain.tar.xz
+          sha256sum dist/toolchain.tar.xz > dist/dependencies.sha256
+          tar -xJf dist/toolchain.tar.xz -C "$THEOS/toolchain"
+          curl -fL --retry 3 https://raw.githubusercontent.com/Sn0wCooder/theos-sdks/master/iPhoneOS9.2.sdk.tbz2 -o dist/sdk.tbz2
+          sha256sum dist/sdk.tbz2 >> dist/dependencies.sha256
+          tar -xjf dist/sdk.tbz2 -C "$THEOS/sdks"
+          git -C "$THEOS" rev-parse HEAD > dist/theos-commit.txt
+      - name: Compile native iPad client
+        run: |
+          set -euo pipefail
+          python3 pc-ipad/scripts/make_assets.py
+          python3 - <<'PY'
+          import plistlib,os
+          path='pc-ipad/ios/Resources/Info.plist'
+          with open(path,'rb') as f:p=plistlib.load(f)
+          p['CFBundleVersion']=str(int(os.environ['GITHUB_RUN_NUMBER'])+1)
+          with open(path,'wb') as f:plistlib.dump(p,f)
+          PY
+          (cd pc-ipad/ios && make FINALPACKAGE=1 && make stage FINALPACKAGE=1) 2>&1 | tee dist/ipad-build.log
+      - name: Package and inspect IPA
+        run: |
+          set -euo pipefail
+          APP="$(find pc-ipad/ios/.theos/_ -type d -name ShockStream.app -print -quit)"
+          test -n "$APP"
+          cp pc-ipad/ios/Resources/Info.plist "$APP/Info.plist"
+          file "$APP/ShockStream" | tee dist/architecture.txt
+          mkdir -p dist/Payload
+          cp -a "$APP" dist/Payload/
+          (cd dist && zip -qry ShockStream-iOS9-ARMv7.ipa Payload)
+          python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-iOS9-ARMv7
+          path: |
+            dist/*.ipa
+            dist/*.json
+            dist/*.txt
+            dist/*.sha256
+            dist/*.log
+          if-no-files-found: error
+      - name: Save failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-iPad-build-logs
+          path: dist/*.log

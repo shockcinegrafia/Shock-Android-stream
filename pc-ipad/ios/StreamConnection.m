@@ -1,0 +1,111 @@
+#import "StreamConnection.h"
+#import <CommonCrypto/CommonHMAC.h>
+#import <CommonCrypto/CommonDigest.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+
+@interface StreamConnection ()
+@property(nonatomic) int fd;
+@property(nonatomic) BOOL closed;
+@property(nonatomic) BOOL writing;
+@property(nonatomic,strong) NSMutableArray *outgoing;
+@property(nonatomic,strong) dispatch_queue_t writer;
+@end
+@implementation StreamConnection
+- (instancetype)init {
+    if((self=[super init])) { _fd=-1; _outgoing=[NSMutableArray new]; _writer=dispatch_queue_create("shock.writer",DISPATCH_QUEUE_SERIAL); }
+    return self;
+}
+static BOOL readAll(int fd,void *buffer,size_t count) {
+    uint8_t *bytes=buffer; size_t done=0;
+    while(done<count) { ssize_t n=recv(fd,bytes+done,count-done,0); if(n<=0)return NO; done+=(size_t)n; }
+    return YES;
+}
+static BOOL writeAll(int fd,const void *buffer,size_t count) {
+    const uint8_t *bytes=buffer; size_t done=0;
+    while(done<count) { ssize_t n=send(fd,bytes+done,count-done,0); if(n<=0)return NO; done+=(size_t)n; }
+    return YES;
+}
+- (void)connectHost:(NSString *)host port:(int)port pin:(NSString *)pin {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),^{
+        @autoreleasepool {
+            NSString *reason=@"Conexão encerrada";
+            int fd=socket(AF_INET,SOCK_STREAM,0);
+            if(fd<0) { if(self.ended)self.ended(@"Não foi possível abrir a conexão"); return; }
+            @synchronized(self) { if(self.closed){close(fd);return;} self.fd=fd; }
+            struct timeval timeout={5,0};
+            setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+            setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+            int yes=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
+            setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof(yes));
+            struct sockaddr_in address={0};address.sin_family=AF_INET;address.sin_port=htons((uint16_t)port);
+            if(inet_pton(AF_INET,host.UTF8String,&address.sin_addr)!=1)reason=@"Informe o IP IPv4 do PC";
+            else if(connect(fd,(struct sockaddr *)&address,sizeof(address))<0)reason=@"PC não encontrado; confira IP, porta e Firewall";
+            else {
+                uint8_t challenge[38],response[CC_SHA256_DIGEST_LENGTH],accepted=0;
+                if(readAll(fd,challenge,sizeof(challenge))&&memcmp(challenge,"SHOCK1",6)==0) {
+                    const char *key=pin.UTF8String;
+                    CCHmac(kCCHmacAlgSHA256,key,strlen(key),challenge+6,32,response);
+                    if(writeAll(fd,response,sizeof(response))&&readAll(fd,&accepted,1)&&accepted==1) {
+                        while(!self.closed) {
+                            uint8_t header[5];if(!readAll(fd,header,5))break;
+                            uint32_t length;memcpy(&length,header+1,4);length=ntohl(length);
+                            if(length>4*1024*1024){reason=@"Pacote inválido";break;}
+                            NSMutableData *body=[NSMutableData dataWithLength:length];
+                            if(!readAll(fd,body.mutableBytes,length))break;
+                            if(self.received)self.received(header[0],body);
+                        }
+                    } else reason=@"PIN incorreto ou host indisponível";
+                } else reason=@"O PC não respondeu ao protocolo Shock Stream";
+            }
+            [self disconnect];
+            // Keep the descriptor reserved until the reader and queued writer stop.
+            dispatch_sync(self.writer,^{});
+            @synchronized(self) { if(self.fd==fd){close(fd);self.fd=-1;} }
+            if(self.ended)self.ended(reason);
+        }
+    });
+}
+- (void)sendKind:(uint8_t)kind body:(NSData *)body {
+    if(!body)body=[NSData data];
+    BOOL schedule=NO;
+    @synchronized(self) {
+        if(self.closed||self.fd<0)return;
+        // Consecutive axis updates with the same button/trigger state may replace each other.
+        NSDictionary *last=self.outgoing.lastObject;
+        if(kind==11&&[last[@"kind"] intValue]==11) {
+            NSDictionary *old=[NSJSONSerialization JSONObjectWithData:last[@"body"] options:0 error:nil];
+            NSDictionary *next=[NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+            if([old[@"buttons"] isEqual:next[@"buttons"]]&&[old[@"lt"] isEqual:next[@"lt"]]&&[old[@"rt"] isEqual:next[@"rt"]]) [self.outgoing removeLastObject];
+        }
+        if(self.outgoing.count>=128){[self disconnect];return;}
+        [self.outgoing addObject:@{@"kind":@(kind),@"body":body}];
+        if(!self.writing){self.writing=YES;schedule=YES;}
+    }
+    if(schedule)dispatch_async(self.writer,^{
+        while(YES) {
+            NSDictionary *item;int fd;
+            @synchronized(self) {
+                if(self.closed||!self.outgoing.count){self.writing=NO;return;}
+                item=self.outgoing[0];[self.outgoing removeObjectAtIndex:0];fd=self.fd;
+            }
+            NSData *payload=item[@"body"];uint8_t header[5];header[0]=[item[@"kind"] unsignedCharValue];
+            uint32_t size=htonl((uint32_t)payload.length);memcpy(header+1,&size,4);
+            if(!writeAll(fd,header,5)||!writeAll(fd,payload.bytes,payload.length)){[self disconnect];return;}
+        }
+    });
+}
+- (void)sendPad:(NSDictionary *)state {
+    [self sendKind:11 body:[NSJSONSerialization dataWithJSONObject:state options:0 error:nil]];
+}
+- (void)disconnect {
+    @synchronized(self) {
+        if(self.closed)return;self.closed=YES;[self.outgoing removeAllObjects];
+        if(self.fd>=0)shutdown(self.fd,SHUT_RDWR);
+    }
+}
+@end
