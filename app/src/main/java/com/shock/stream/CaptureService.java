@@ -31,6 +31,7 @@ public class CaptureService extends Service {
  private final AtomicReference<byte[]> latest=new AtomicReference<>();
  private final Object frameLock=new Object();
  private long lastFrame=0;
+ private volatile boolean streamConnected=false;
  private Bitmap frameBitmap;
  private Bitmap croppedBitmap;
  private ByteArrayOutputStream jpegBuffer;
@@ -87,7 +88,7 @@ public class CaptureService extends Service {
      image=r.acquireLatestImage();
      if(image==null)return;
      long now=android.os.SystemClock.elapsedRealtime();
-     if(now-lastFrame<66)return;
+     if(now-lastFrame<55||!streamConnected)return;
      lastFrame=now;
      Image.Plane plane=image.getPlanes()[0];
      ByteBuffer buffer=plane.getBuffer();
@@ -152,6 +153,7 @@ public class CaptureService extends Service {
     out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\r\nContent-Type: text/plain\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
    }else if(path.startsWith("/stream")){
+    streamConnected=true;
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=shockframe\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     byte[] previous=null;
     while(running&&!s.isClosed()){
