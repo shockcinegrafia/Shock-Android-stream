@@ -75,7 +75,9 @@ public class CaptureService extends Service {
    DisplayMetrics metrics=new DisplayMetrics();
    ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(metrics);
    int width=metrics.widthPixels,height=metrics.heightPixels;
-   float scale=Math.min(1f,800f/Math.max(width,height));
+   // Fit the Android image inside the iPad mini 1 native 1024x768 landscape canvas.
+   // Keep the Android aspect ratio to avoid distorting games and touch coordinates.
+   float scale=Math.min(1f,Math.min(1024f/Math.max(width,height),768f/Math.min(width,height)));
    width=Math.max(2,((int)(width*scale))&~1);
    height=Math.max(2,((int)(height*scale))&~1);
    reader=ImageReader.newInstance(width,height,PixelFormat.RGBA_8888,2);
