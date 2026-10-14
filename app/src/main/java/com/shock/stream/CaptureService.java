@@ -120,7 +120,21 @@ public class CaptureService extends Service {
    String path=parts.length>1?parts[1]:"/";
    String line;while((line=input.readLine())!=null&&!line.isEmpty()){}
    OutputStream out=s.getOutputStream();
-   if(path.startsWith("/stream")){
+   if(path.startsWith("/tap?")){
+    boolean ok=false;
+    try{
+     String query=path.substring(path.indexOf('?')+1);
+     float x=-1,y=-1;
+     for(String pair:query.split("&")){
+      String[] kv=pair.split("=",2);
+      if(kv.length==2){if(kv[0].equals("x"))x=Float.parseFloat(kv[1]);if(kv[0].equals("y"))y=Float.parseFloat(kv[1]);}
+     }
+     if(x>=0&&x<=1&&y>=0&&y<=1)ok=TouchAccessibilityService.tap(x,y);
+    }catch(Exception ignored){}
+    byte[] body=(ok?"OK":"ACCESSIBILITY_DISABLED").getBytes("UTF-8");
+    out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\\r\\nContent-Type: text/plain\\r\\nContent-Length: "+body.length+"\\r\\nConnection: close\\r\\n\\r\\n").getBytes("UTF-8"));
+    out.write(body);out.flush();
+   }else if(path.startsWith("/stream")){
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=shockframe\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     byte[] previous=null;
     while(running&&!s.isClosed()){
@@ -131,7 +145,7 @@ public class CaptureService extends Service {
      out.write(frame);out.write("\r\n".getBytes("UTF-8"));out.flush();
     }
    }else{
-    String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><meta name='apple-mobile-web-app-capable' content='yes'><title>Shock Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;font-family:Arial}#video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain}#controls{position:absolute;z-index:5;top:8px;right:8px;background:rgba(0,0,0,.7);padding:5px;border-radius:5px}button{font-size:14px;color:#fff;background:#333;border:1px solid #888;border-radius:4px;padding:9px;margin:2px}#tip{position:absolute;bottom:5px;left:8px;color:#ddd;font-size:11px}</style></head><body><img id='video' src='/stream' alt='Aguardando transmissao'><div id='controls'><button id='fit'>Ajustar</button><button id='fill'>Preencher</button><button id='hide'>Ocultar</button></div><div id='tip'>Shock Stream | toque no canto superior direito para controles</div><script>(function(){var v=document.getElementById('video'),c=document.getElementById('controls');document.getElementById('fit').onclick=function(){v.style.objectFit='contain';v.style.width='100%';v.style.height='100%'};document.getElementById('fill').onclick=function(){v.style.objectFit='cover';v.style.width='100%';v.style.height='100%'};document.getElementById('hide').onclick=function(){c.style.display='none';document.getElementById('tip').style.display='none'};document.body.addEventListener('touchstart',function(e){if(c.style.display==='none'&&e.touches.length===2){c.style.display='block'}},false)})();</script></body></html>";
+    String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><meta name='apple-mobile-web-app-capable' content='yes'><title>Shock Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;font-family:Arial}#video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain}#controls{position:absolute;z-index:5;top:8px;right:8px;background:rgba(0,0,0,.7);padding:5px;border-radius:5px}button{font-size:14px;color:#fff;background:#333;border:1px solid #888;border-radius:4px;padding:9px;margin:2px}#tip{position:absolute;bottom:5px;left:8px;color:#ddd;font-size:11px}</style></head><body><img id='video' src='/stream' alt='Aguardando transmissao'><div id='controls'><button id='fit'>Ajustar</button><button id='fill'>Preencher</button><button id='hide'>Ocultar</button><button id='touch'>Toque: OFF</button></div><div id='tip'>Shock Stream | ative acessibilidade no Android para controlar</div><script>(function(){var v=document.getElementById('video'),c=document.getElementById('controls'),touch=false;document.getElementById('fit').onclick=function(){v.style.objectFit='contain'};document.getElementById('fill').onclick=function(){v.style.objectFit='cover'};document.getElementById('hide').onclick=function(){c.style.display='none';document.getElementById('tip').style.display='none'};document.getElementById('touch').onclick=function(){touch=!touch;this.innerHTML=touch?'Toque: ON':'Toque: OFF'};document.body.addEventListener('touchstart',function(e){if(c.style.display==='none'&&e.touches.length===2){c.style.display='block';return}if(!touch||e.target!==v||e.touches.length!==1)return;e.preventDefault();var rect=v.getBoundingClientRect(),px=e.touches[0].clientX-rect.left,py=e.touches[0].clientY-rect.top;var nw=v.naturalWidth||1,nh=v.naturalHeight||1,rw=rect.width,rh=rect.height,scale=v.style.objectFit==='cover'?Math.max(rw/nw,rh/nh):Math.min(rw/nw,rh/nh);var dw=nw*scale,dh=nh*scale,x=(px-(rw-dw)/2)/dw,y=(py-(rh-dh)/2)/dh;if(x<0||x>1||y<0||y>1)return;var req=new XMLHttpRequest();req.open('GET','/tap?x='+x.toFixed(5)+'&y='+y.toFixed(5),true);req.send(null)},false)})();</script></body></html>";
     byte[] body=html.getBytes("UTF-8");
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
