@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><title>Shock Stream</title><style>
+html,body{margin:0;padding:0;overflow:hidden;background:#000;font-family:Arial;width:100%;height:100%}#video{position:absolute}#controls{position:absolute;z-index:5;top:8px;right:8px;background:rgba(0,0,0,.7);padding:5px}button{font-size:14px;color:white;background:#333;border:1px solid #888;padding:9px;margin:2px}#status{color:white;font-size:12px}
+</style></head><body><img id="video" alt="Aguardando transmissao"><div id="controls"><button id="fit">Ajustar</button><button id="fill">Preencher</button><button id="touch">Toque: OFF</button><span id="status"></span></div><script>
+(function(){
+'use strict';
+var v=document.getElementById('video'),enabled=false,cover=false,active={},queue=[],sending=false,nw=0,nh=0,serial=0,viewWidth=0,viewHeight=0;
+function layout(){
+ var w=window.innerWidth,h=window.innerHeight;
+ viewWidth=w;viewHeight=h;
+ if(!nw||!nh)return;
+ var scale=cover?Math.max(w/nw,h/nh):Math.min(w/nw,h/nh);
+ v.style.width=(nw*scale)+'px';v.style.height=(nh*scale)+'px';
+ v.style.left=((w-nw*scale)/2)+'px';v.style.top=((h-nh*scale)/2)+'px';
+ for(var key in active){active[key].p=point(active[key].t);}
+}
+function point(t){var r=v.getBoundingClientRect();return {x:Math.max(0,Math.min(1,(t.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(t.clientY-r.top)/r.height))};}
+function status(text){document.getElementById('status').innerHTML=text;}
+function flush(){
+ if(sending||!queue.length)return;
+ sending=true;var batch=queue.splice(0,100),req=new XMLHttpRequest(),done=false;
+ req.open('POST','/events',true);req.setRequestHeader('Content-Type','application/json');req.timeout=700;
+ function end(ok){if(done)return;done=true;sending=false;if(!ok){queue=[];active={};enabled=false;document.getElementById('touch').innerHTML='Toque: OFF';status('Falha no toque; ative novamente');}flush();}
+ req.onreadystatechange=function(){if(req.readyState===4)end(req.status===200);};req.onerror=function(){end(false);};req.ontimeout=function(){end(false);};req.send(JSON.stringify(batch));
+}
+function send(a,id,p){
+ var item={a:a,id:id,x:p.x,y:p.y};
+ if(a==='move'||a==='hold'){for(var i=queue.length-1;i>=0;i--){if(queue[i].id===id){if(queue[i].a==='move'||queue[i].a==='hold'){queue[i]=item;return;}break;}}}
+ queue.push(item);flush();
+}
+function cancel(){for(var key in active){var f=active[key];send('cancel',f.slot,f.p);}active={};}
+function handle(e,a){
+ if(!enabled)return;
+ if(a==='down'&&e.target!==v)return;
+ e.preventDefault();
+ for(var i=0;i<e.changedTouches.length;i++){
+  var t=e.changedTouches[i],key=t.identifier,f=active[key];
+  if(a==='down'){
+   if(f)continue;
+   var r=v.getBoundingClientRect();if(t.clientX<r.left||t.clientX>r.right||t.clientY<r.top||t.clientY>r.bottom)continue;
+   var slot=-1;for(var n=0;n<5;n++){var used=false;for(var k in active)if(active[k].slot===n)used=true;if(!used){slot=n;break;}}
+   if(slot<0)continue;f={slot:slot,p:point(t),t:t};active[key]=f;
+  }else if(!f)continue;
+  f.t=t;f.p=point(t);send(a,f.slot,f.p);
+  if(a==='up'||a==='cancel')delete active[key];
+ }
+}
+document.getElementById('fit').onclick=function(){cover=false;layout();};
+document.getElementById('fill').onclick=function(){cover=true;layout();};
+document.getElementById('touch').onclick=function(){if(enabled)cancel();enabled=!enabled;this.innerHTML=enabled?'Toque: ON':'Toque: OFF';};
+document.addEventListener('touchstart',function(e){handle(e,'down');},false);
+document.addEventListener('touchmove',function(e){handle(e,'move');},false);
+document.addEventListener('touchend',function(e){handle(e,'up');},false);
+document.addEventListener('touchcancel',function(e){handle(e,'cancel');},false);
+window.addEventListener('resize',layout,false);window.addEventListener('orientationchange',function(){layout();setTimeout(layout,200);},false);
+window.addEventListener('pagehide',cancel,false);window.addEventListener('blur',cancel,false);
+document.addEventListener('visibilitychange',function(){if(document.hidden)cancel();},false);
+setInterval(function(){if(window.innerWidth!==viewWidth||window.innerHeight!==viewHeight)layout();for(var k in active)send('hold',active[k].slot,active[k].p);},400);
+// One JPEG request and one decode at a time: no multipart/TCP frame backlog.
+function frame(){
+ if(document.hidden){setTimeout(frame,250);return;}
+ v.onload=function(){
+  if(nw!==v.naturalWidth||nh!==v.naturalHeight){nw=v.naturalWidth;nh=v.naturalHeight;layout();}
+  setTimeout(frame,0);
+ };
+ v.onerror=function(){setTimeout(frame,150);};
+ v.src='/frame?n='+(serial++);
+}
+layout();frame();
+})();
+</script></body></html>

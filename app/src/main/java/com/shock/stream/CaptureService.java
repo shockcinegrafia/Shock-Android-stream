@@ -31,7 +31,11 @@ public class CaptureService extends Service {
  private final AtomicReference<byte[]> latest=new AtomicReference<>();
  private final Object frameLock=new Object();
  private long lastFrame=0;
- private volatile boolean streamConnected=false;
+ private volatile long demandUntil=0;
+ private Handler captureHandler;
+ private int captureWidth,captureHeight,density;
+ private DisplayManager displayManager;
+ private DisplayManager.DisplayListener rotationListener;
  private Bitmap frameBitmap;
  private Bitmap croppedBitmap;
  private ByteArrayOutputStream jpegBuffer;
@@ -69,33 +73,59 @@ public class CaptureService extends Service {
    projection=mgr.getMediaProjection(result,data);
    if(projection==null){status("Captura nao autorizada");return;}
    imageThread=new HandlerThread("ShockFrames");imageThread.start();
-   Handler handler=new Handler(imageThread.getLooper());
+   Handler handler=new Handler(imageThread.getLooper());captureHandler=handler;
+   final MediaProjection session=projection;
    projection.registerCallback(new MediaProjection.Callback(){
-    @Override public void onStop(){stopCapture();status("Captura encerrada pelo Android");}
+    @Override public void onStop(){if(projection!=session)return;stopCapture();status("Captura encerrada pelo Android");}
+    @Override public void onCapturedContentResize(int w,int h){resizeCapture(w,h);}
    },handler);
    DisplayMetrics metrics=new DisplayMetrics();
    ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(metrics);
-   int width=metrics.widthPixels,height=metrics.heightPixels;
-   // Fit the Android image inside the iPad mini 1 native 1024x768 landscape canvas.
-   // Keep the Android aspect ratio to avoid distorting games and touch coordinates.
-   float scale=Math.min(1f,Math.min(1024f/Math.max(width,height),768f/Math.min(width,height)));
-   width=Math.max(2,((int)(width*scale))&~1);
-   height=Math.max(2,((int)(height*scale))&~1);
+   density=metrics.densityDpi;
+   int[] dimensions=scaledSize(metrics.widthPixels,metrics.heightPixels);
+   int width=dimensions[0],height=dimensions[1];
+   captureWidth=width;captureHeight=height;
    reader=ImageReader.newInstance(width,height,PixelFormat.RGBA_8888,2);
-   reader.setOnImageAvailableListener(r->{
+   attachReader(reader);
+   display=projection.createVirtualDisplay("ShockCapture",width,height,metrics.densityDpi,
+    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,handler);
+   capturing=true;
+   displayManager=(DisplayManager)getSystemService(DISPLAY_SERVICE);
+   rotationListener=new DisplayManager.DisplayListener(){
+    public void onDisplayAdded(int id){}
+    public void onDisplayRemoved(int id){}
+    public void onDisplayChanged(int id){
+     if(id==android.view.Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT<34){
+      DisplayMetrics m=new DisplayMetrics();
+      ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(m);
+      resizeCapture(m.widthPixels,m.heightPixels);
+     }
+    }
+   };
+   displayManager.registerDisplayListener(rotationListener,handler);
+   status("Captura ativa: "+width+"x"+height+" MJPEG");
+  }catch(Exception e){status("Falha na captura: "+e.getMessage());android.util.Log.e("ShockStream","Capture error",e);stopCapture();}
+ }
+ private static int[] scaledSize(int w,int h){
+  float scale=Math.min(1f,Math.min(1024f/Math.max(w,h),768f/Math.min(w,h)));
+  return new int[]{Math.max(2,((int)(w*scale))&~1),Math.max(2,((int)(h*scale))&~1)};
+ }
+ private void attachReader(ImageReader target){
+   target.setOnImageAvailableListener(r->{
     Image image=null;
     try{
      image=r.acquireLatestImage();
+     if(r!=reader)return;
      if(image==null)return;
      long now=android.os.SystemClock.elapsedRealtime();
-     if(now-lastFrame<55||!streamConnected)return;
+     if(now-lastFrame<33||now>demandUntil)return;
      lastFrame=now;
      Image.Plane plane=image.getPlanes()[0];
      ByteBuffer buffer=plane.getBuffer();
      int pixelStride=plane.getPixelStride(),rowStride=plane.getRowStride();
      int w=image.getWidth(),h=image.getHeight();
      int paddedWidth=rowStride/pixelStride;
-     if(frameBitmap==null||frameBitmap.getWidth()!=paddedWidth||frameBitmap.getHeight()!=h){
+     if(frameBitmap==null||frameBitmap.getWidth()!=paddedWidth||frameBitmap.getHeight()!=h||croppedBitmap.getWidth()!=w){
       if(frameBitmap!=null)frameBitmap.recycle();
       if(croppedBitmap!=null)croppedBitmap.recycle();
       frameBitmap=Bitmap.createBitmap(paddedWidth,h,Bitmap.Config.ARGB_8888);
@@ -112,12 +142,23 @@ public class CaptureService extends Service {
      synchronized(frameLock){frameLock.notifyAll();}
     }catch(Exception e){android.util.Log.e("ShockStream","Frame error",e);}
     finally{if(image!=null)image.close();}
-   },handler);
-   display=projection.createVirtualDisplay("ShockCapture",width,height,metrics.densityDpi,
-    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,handler);
-   capturing=true;
-   status("Captura ativa: "+width+"x"+height+" MJPEG");
-  }catch(Exception e){status("Falha na captura: "+e.getMessage());android.util.Log.e("ShockStream","Capture error",e);stopCapture();}
+   },captureHandler);
+ }
+ // Called on the capture handler: one projection consent, one VirtualDisplay.
+ private void resizeCapture(int w,int h){
+  if(!capturing||display==null||w<=0||h<=0)return;
+  int[] size=scaledSize(w,h);
+  if(size[0]==captureWidth&&size[1]==captureHeight)return;
+  try{
+   ImageReader replacement=ImageReader.newInstance(size[0],size[1],PixelFormat.RGBA_8888,2);
+   ImageReader old=reader;
+   display.setSurface(null);
+   display.resize(size[0],size[1],density);
+   reader=replacement;attachReader(reader);display.setSurface(reader.getSurface());
+   captureWidth=size[0];captureHeight=size[1];latest.set(null);lastFrame=0;
+   if(old!=null){old.setOnImageAvailableListener(null,null);old.close();}
+   status("Captura ativa: "+captureWidth+"x"+captureHeight+" MJPEG");
+  }catch(Exception e){status("Falha ao redimensionar: "+e.getMessage());stopCapture();}
  }
  private void serve(){
   try(ServerSocket s=new ServerSocket(8088)){
@@ -127,14 +168,23 @@ public class CaptureService extends Service {
  }
  private void reply(Socket socket){
   try(Socket s=socket){
-   s.setSoTimeout(10000);
+   s.setSoTimeout(10000);s.setTcpNoDelay(true);s.setSendBufferSize(32768);
    BufferedReader input=new BufferedReader(new InputStreamReader(s.getInputStream(),"UTF-8"));
    String request=input.readLine();if(request==null)return;
    String[] parts=request.split(" ");
    String path=parts.length>1?parts[1]:"/";
-   String line;while((line=input.readLine())!=null&&!line.isEmpty()){}
+   int length=0;String line;
+   while((line=input.readLine())!=null&&!line.isEmpty()){
+    if(line.toLowerCase(java.util.Locale.ROOT).startsWith("content-length:"))length=Integer.parseInt(line.substring(15).trim());
+   }
+   if(length<0||length>16384)return;
    OutputStream out=s.getOutputStream();
-   if(path.startsWith("/input?")){
+   if(path.equals("/events")&&request.startsWith("POST ")){
+    char[] body=new char[length];int read=0;
+    while(read<length){int n=input.read(body,read,length-read);if(n<0)return;read+=n;}
+    boolean ok=TouchAccessibilityService.batch(new String(body));
+    out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));out.flush();
+   }else if(path.startsWith("/input?")){
     boolean ok=false;
     try{
      String action="",query=path.substring(path.indexOf('?')+1);
@@ -152,11 +202,23 @@ public class CaptureService extends Service {
     byte[] body=(ok?"OK":"INPUT_UNAVAILABLE").getBytes("UTF-8");
     out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\r\nContent-Type: text/plain\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
+   }else if(path.startsWith("/frame")){
+    demandUntil=SystemClock.elapsedRealtime()+1500;
+    byte[] before=latest.get(),frame=null;
+    long until=SystemClock.elapsedRealtime()+1000;
+    synchronized(frameLock){
+     while(running && (frame=latest.get())==before && SystemClock.elapsedRealtime()<until)frameLock.wait(50);
+    }
+    if(frame==null){out.write("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes("UTF-8"));}
+    else{
+     out.write(("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store\r\nContent-Length: "+frame.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));out.write(frame);
+    }out.flush();
    }else if(path.startsWith("/stream")){
-    streamConnected=true;
+    demandUntil=SystemClock.elapsedRealtime()+1500;
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=shockframe\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     byte[] previous=null;
     while(running&&!s.isClosed()){
+     demandUntil=SystemClock.elapsedRealtime()+1500;
      byte[] frame=latest.get();
      if(frame==null||frame==previous){synchronized(frameLock){frameLock.wait(500);}continue;}
      previous=frame;
@@ -164,15 +226,22 @@ public class CaptureService extends Service {
      out.write(frame);out.write("\r\n".getBytes("UTF-8"));out.flush();
     }
    }else{
-    String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'><meta name='apple-mobile-web-app-capable' content='yes'><title>Shock Stream</title><style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;font-family:Arial}#video{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain}#controls{position:absolute;z-index:5;top:8px;right:8px;background:rgba(0,0,0,.7);padding:5px;border-radius:5px}button{font-size:14px;color:#fff;background:#333;border:1px solid #888;border-radius:4px;padding:9px;margin:2px}</style></head><body><img id='video' src='/stream' alt='Aguardando transmissao'><div id='controls'><button id='fit'>Ajustar</button><button id='fill'>Preencher</button><button id='hide'>Ocultar</button><button id='touch'>Toque: OFF</button></div><script>(function(){var v=document.getElementById('video'),c=document.getElementById('controls'),enabled=false,active={},last={};document.getElementById('fit').onclick=function(){v.style.objectFit='contain'};document.getElementById('fill').onclick=function(){v.style.objectFit='cover'};document.getElementById('hide').onclick=function(){c.style.display='none'};document.getElementById('touch').onclick=function(){enabled=!enabled;this.innerHTML=enabled?'Toque: ON':'Toque: OFF'};function point(t){var r=v.getBoundingClientRect(),nw=v.naturalWidth||1,nh=v.naturalHeight||1,scale=v.style.objectFit==='cover'?Math.max(r.width/nw,r.height/nh):Math.min(r.width/nw,r.height/nh),w=nw*scale,h=nh*scale;return {x:Math.max(0,Math.min(1,(t.clientX-r.left-(r.width-w)/2)/w)),y:Math.max(0,Math.min(1,(t.clientY-r.top-(r.height-h)/2)/h))}}var queue=[],sending=false;function flush(){if(sending||!queue.length)return;sending=true;var item=queue.shift(),req=new XMLHttpRequest();req.open('GET','/input?a='+item.a+'&id='+item.id+'&x='+item.p.x.toFixed(5)+'&y='+item.p.y.toFixed(5),true);req.timeout=1200;var done=false;function next(){if(done)return;done=true;sending=false;flush()}req.onreadystatechange=function(){if(req.readyState===4)next()};req.onerror=next;req.ontimeout=next;req.send(null)}function send(a,id,p){if(a==='move'){for(var i=queue.length-1;i>=0;i--){if(queue[i].id===id){if(queue[i].a==='move'){queue[i].p=p;return}break}}}queue.push({a:a,id:id,p:p});flush()}function handle(e,a){if(!enabled)return;if(e.target!==v&&a==='down')return;e.preventDefault();for(var i=0;i<e.changedTouches.length;i++){var t=e.changedTouches[i],id=t.identifier;if(a==='down'){if(active[id]!==undefined)continue;var slot=-1;for(var n=0;n<5;n++){var used=false;for(var key in active)if(active[key]===n)used=true;if(!used){slot=n;break}}if(slot<0)continue;active[id]=slot}else if(active[id]===undefined)continue;var p=point(t),now=new Date().getTime();if(a!=='move'||!last[id]||now-last[id]>25){send(a,active[id],p);last[id]=now}if(a==='up'||a==='cancel'){delete active[id];delete last[id]}}}document.body.addEventListener('touchstart',function(e){if(c.style.display==='none'&&e.touches.length===2){c.style.display='block';return}handle(e,'down')},false);document.body.addEventListener('touchmove',function(e){handle(e,'move')},false);document.body.addEventListener('touchend',function(e){handle(e,'up')},false);document.body.addEventListener('touchcancel',function(e){handle(e,'cancel')},false)})();</script></body></html>";
+    ByteArrayOutputStream page=new ByteArrayOutputStream();
+    try(InputStream asset=getAssets().open("index.html")){byte[] chunk=new byte[4096];int n;while((n=asset.read(chunk))!=-1)page.write(chunk,0,n);}
+    String html=page.toString("UTF-8");
     byte[] body=html.getBytes("UTF-8");
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
    }
   }catch(Exception e){android.util.Log.d("ShockStream","Client disconnected: "+e.getMessage());}
  }
- private synchronized void stopCapture(){
+ private void stopCapture(){
+  Handler h=captureHandler;
+  if(h!=null&&Looper.myLooper()!=h.getLooper()){h.post(this::stopCapture);return;}
+  captureHandler=null;
   capturing=false;latest.set(null);
+  TouchAccessibilityService.cancelAll();
+  if(displayManager!=null&&rotationListener!=null){displayManager.unregisterDisplayListener(rotationListener);rotationListener=null;}
   if(frameBitmap!=null){frameBitmap.recycle();frameBitmap=null;}
   if(croppedBitmap!=null){croppedBitmap.recycle();croppedBitmap=null;}
   jpegBuffer=null;
