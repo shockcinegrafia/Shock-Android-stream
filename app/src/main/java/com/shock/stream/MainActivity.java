@@ -26,7 +26,9 @@ public class MainActivity extends Activity {
   Button start=new Button(this);start.setText("Autorizar captura e iniciar");
   start.setOnClickListener(v->{
    MediaProjectionManager m=(MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
-   startActivityForResult(m.createScreenCaptureIntent(),REQUEST);
+   if(android.os.Build.VERSION.SDK_INT>=34)
+    startActivityForResult(m.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()),REQUEST);
+   else startActivityForResult(m.createScreenCaptureIntent(),REQUEST);
   });
   Button copy=new Button(this);copy.setText("Copiar IP local");
   copy.setOnClickListener(v->{
@@ -40,7 +42,7 @@ public class MainActivity extends Activity {
  }
  private void showStatus(String state){
   String ip=NetworkInfoUtil.ip(this);
-  status.setText("Shock Android Stream v0.2\nEstado: "+state+"\n\nPrincipal (se mDNS resolver):\nhttp://share.local:8088\n\nAlternativo:\nhttp://"+ip+":8088\n\nAndroid e iPad devem estar na mesma rede Wi-Fi.");
+  status.setText("Shock Android Stream v0.3.0\nEstado: "+state+"\n\nPrincipal (se mDNS resolver):\nhttp://share.local:8088\n\nAlternativo:\nhttp://"+ip+":8088\n\nAndroid e iPad devem estar na mesma rede Wi-Fi.");
  }
  @Override protected void onResume(){super.onResume();registerReceiver(updates,new IntentFilter(CaptureService.STATUS_ACTION),Context.RECEIVER_NOT_EXPORTED);}
  @Override protected void onPause(){unregisterReceiver(updates);super.onPause();}

@@ -1,5 +1,6 @@
 name: Build Android APK
 on:
+  pull_request:
   workflow_dispatch:
   push:
     branches: [main]
@@ -8,6 +9,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test Safari ES5 client
+        run: |
+          npm install --no-save --ignore-scripts --no-package-lock acorn@8.15.0
+          node tests/browser.test.cjs
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -35,8 +43,17 @@ jobs:
           SHOCK_KEYSTORE_PASSWORD: ${{ secrets.SHOCK_KEYSTORE_PASSWORD }}
           SHOCK_KEY_ALIAS: ${{ secrets.SHOCK_KEY_ALIAS }}
           SHOCK_KEY_PASSWORD: ${{ secrets.SHOCK_KEY_PASSWORD }}
-        run: gradle :app:assembleDebug --no-daemon
+        run: |
+          export SHOCK_VERSION_CODE=$((3 + ${{ github.run_number }}))
+          gradle :app:assembleDebug --no-daemon
+      - name: Verify APK and record signing certificate
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee signing-certificate.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging app/build/outputs/apk/debug/app-debug.apk | head -1 | tee apk-version.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: ShockAndroidStream-v0.2.1-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ShockAndroidStream-v0.3.0-debug
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            signing-certificate.txt
+            apk-version.txt
