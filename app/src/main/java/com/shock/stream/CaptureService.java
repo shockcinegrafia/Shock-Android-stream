@@ -132,7 +132,7 @@ public class CaptureService extends Service {
      if(x>=0&&x<=1&&y>=0&&y<=1)ok=TouchAccessibilityService.tap(x,y);
     }catch(Exception ignored){}
     byte[] body=(ok?"OK":"ACCESSIBILITY_DISABLED").getBytes("UTF-8");
-    out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\\r\\nContent-Type: text/plain\\r\\nContent-Length: "+body.length+"\\r\\nConnection: close\\r\\n\\r\\n").getBytes("UTF-8"));
+    out.write(("HTTP/1.1 "+(ok?"200 OK":"503 Service Unavailable")+"\r\nContent-Type: text/plain\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
     out.write(body);out.flush();
    }else if(path.startsWith("/stream")){
     out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=shockframe\r\nCache-Control: no-cache, no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
