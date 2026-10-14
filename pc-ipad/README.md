@@ -29,7 +29,7 @@ O código fica em `pc-ipad/windows` e `pc-ipad/ios`, independente do host Androi
 
 O workflow iPad usa a base Theos/Linux + SDK 9.2 adotada no LegacyBrowser. Verifica dentro do IPA a arquitetura ARMv7, deployment target iOS 9, frameworks e assinatura. `CFBundleVersion` cresce com o número de execução do workflow. Isso é verificação de build, não prova de instalação/desempenho no aparelho.
 
-Para testes locais do host: defina `VGAMEPAD_SKIP_VIGEMBUS_INSTALL=true`, instale `windows/requirements.txt` em um ambiente isolado e execute `python -m unittest discover -s pc-ipad/tests -v` a partir da raiz do repositório. Testes do controle usam um dispositivo simulado e não enviam input ao PC.
+Para testes locais do host: instale `windows/requirements.txt` em um ambiente isolado e execute `python pc-ipad/scripts/install_gamepad.py`, que verifica o arquivo-fonte e copia o módulo/DLL sem rodar instaladores de driver. Execute `python -m unittest discover -s pc-ipad/tests -v` a partir da raiz do repositório. Testes do controle usam um dispositivo simulado e não enviam input ao PC.
 
 ## Teste nos aparelhos
 

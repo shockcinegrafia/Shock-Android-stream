@@ -20,11 +20,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install isolated build dependencies
-        run: python -m pip install -r pc-ipad/windows/requirements.txt
+        run: |
+          python -m pip install -r pc-ipad/windows/requirements.txt
+          python pc-ipad/scripts/install_gamepad.py
       - name: Test protocol, H.264 and gamepad state
         run: python -m unittest discover -s pc-ipad/tests -v
       - name: Build Windows program
-        run: python -m PyInstaller --noconfirm --clean --onedir --windowed --name ShockStream --collect-all av --collect-all soundcard --collect-all vgamepad --hidden-import _cffi_backend --distpath dist --workpath build/pc --specpath build/pc pc-ipad/windows/host.py
+        run: python pc-ipad/scripts/build_windows.py
       - name: Verify packaged program dependencies
         run: |
           python pc-ipad/windows/host.py --self-test
@@ -35,6 +37,7 @@ jobs:
         run: |
           Copy-Item pc-ipad/README.md dist/ShockStream/LEIA-ME.md
           Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
+          Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
           python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
           Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
       - uses: actions/upload-artifact@v4

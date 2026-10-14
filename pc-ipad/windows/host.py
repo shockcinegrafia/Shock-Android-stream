@@ -24,9 +24,9 @@ DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 class XboxPad:
     def __init__(self):
-        import vgamepad as vg
-        self.vg = vg
         try:
+            import vgamepad as vg
+            self.vg = vg
             self.device = vg.VX360Gamepad()
         except Exception as exc:
             raise RuntimeError("Instale o ViGEmBus e reinicie o programa para criar o gamepad Xbox.") from exc
@@ -159,6 +159,10 @@ class Session:
         if audio:
             self.sock.sendall(packet(AUDIO, audio))
 
+    def watchdog(self):
+        while not self.stop.wait(0.1):
+            self.gamepad.expire()
+
     def run(self):
         import av
         try:
@@ -172,7 +176,7 @@ class Session:
             info = {"version": 1, "width": self.width, "height": self.height, "fps": self.fps,
                     "audio": self.audio, "sampleRate": 44100, "channels": 2, "gamepad": "Xbox 360"}
             self.sock.sendall(packet(INFO, json.dumps(info).encode()))
-            for target in ([self.receive, self.capture_audio] if self.audio else [self.receive]):
+            for target in ([self.receive, self.watchdog, self.capture_audio] if self.audio else [self.receive, self.watchdog]):
                 worker = threading.Thread(target=target, daemon=True)
                 self.threads.append(worker)
                 worker.start()
@@ -349,7 +353,13 @@ def main():
     if args.self_test:
         import av
         import numpy as np
-        import mss, soundcard, vgamepad
+        import mss, soundcard, importlib.util, ctypes
+        # Importing vgamepad itself connects to the bus, which is absent on build runners.
+        spec = importlib.util.find_spec('vgamepad')
+        assert spec and spec.submodule_search_locations
+        dll = Path(next(iter(spec.submodule_search_locations))) / 'win/vigem/client/x64/ViGEmClient.dll'
+        assert dll.is_file(), 'ViGEmClient DLL is missing from the package'
+        ctypes.WinDLL(str(dll))
         encoder = make_encoder(128, 72, 30)
         image = av.VideoFrame.from_ndarray(np.zeros((72, 128, 3), dtype=np.uint8), format="rgb24")
         encoded = b"".join(bytes(p) for p in encoder.encode(image.reformat(format="yuv420p")))
