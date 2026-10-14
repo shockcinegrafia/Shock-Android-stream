@@ -23,7 +23,7 @@ Se já houver uma configuração C:\VirtualDisplayDriver\vdd_settings.xml, ela �
 2. No PC, selecione **USB · Monitor touch** e clique **Detectar iPad**. Selecione o aparelho USB.
 3. Se quiser uma segunda área de trabalho, use **Criar segundo monitor** e escolha **Monitor virtual** em Tela transmitida. Para espelhar, escolha uma tela física. O app também oferece Atualizar e Estender área de trabalho.
 4. Clique **Iniciar**, observe o PIN e, no iPad, escolha **USB · Touch**, informe esse PIN e toque **Aguardar PC pelo USB**. Não precisa informar IP nem usar a mesma rede Wi-Fi.
-5. O iPad mostra a tela escolhida, sem gamepad. Toques, arrastes, soltura e cancelamento são enviados à API nativa InjectTouchInput do Windows, com até dez contatos. Os aplicativos do Windows precisam aceitar o tipo de gesto; um sistema anticheat ou aplicativo elevado pode limitar input injetado.
+5. O iPad mostra a tela escolhida, sem gamepad nem controles sobrepostos. Toques, arrastes, soltura e cancelamento são enviados à API nativa InjectTouchInput do Windows, com até dez contatos. Para sair, use o botão Home do iPad ou Parar no PC. Os aplicativos do Windows precisam aceitar o tipo de gesto; um sistema anticheat ou aplicativo elevado pode limitar input injetado.
 
 O encaminhamento USB usa diretamente o protocolo Apple usbmux no PC, sem executar um iproxy separado. O app do iPad abre o receptor somente no loopback 127.0.0.1:8091. O suporte Apple do PC lista aparelhos USB, abre esse canal e transporta vídeo/áudio/controles. A porta local do serviço Apple é 27015.
 

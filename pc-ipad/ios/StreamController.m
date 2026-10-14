@@ -82,7 +82,7 @@
             if([info[@"version"] intValue]!=1){[weakSelf disconnect];weakSelf.status.text=@"Versão de host incompatível";return;}
             BOOL touch=[info[@"mode"] isEqual:@"touch"];
             weakSelf.touchSurface.videoSize=CGSizeMake([info[@"width"] doubleValue],[info[@"height"] doubleValue]);
-            weakSelf.connected=YES;weakSelf.card.hidden=YES;weakSelf.pad.hidden=touch;weakSelf.touchSurface.hidden=!touch;weakSelf.disconnectButton.hidden=NO;
+            weakSelf.connected=YES;weakSelf.card.hidden=YES;weakSelf.pad.hidden=touch;weakSelf.touchSurface.hidden=!touch;weakSelf.disconnectButton.hidden=touch;
             [UIApplication sharedApplication].idleTimerDisabled=YES;
             if([info[@"audio"] boolValue])weakSelf.audio=[AudioPlayer new];
             weakSelf.heartbeat=[NSTimer scheduledTimerWithTimeInterval:0.25 target:weakSelf selector:@selector(keepAlive) userInfo:nil repeats:YES];

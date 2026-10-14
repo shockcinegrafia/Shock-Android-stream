@@ -1,6 +1,7 @@
 """Native Windows multitouch injection, mapped to the selected monitor."""
 import ctypes as C
 import math
+import logging
 import threading
 import time
 
@@ -88,6 +89,7 @@ class TouchScreen:
             try:
                 for ident in list(self.contacts):
                     self.inject(ident,UP|CANCELED);del self.contacts[ident]
+            except (RuntimeError,OSError):logging.exception('Touch cancellation refused by Windows')
             finally:self.contacts.clear();self.last=time.monotonic()
 
     def expire(self):

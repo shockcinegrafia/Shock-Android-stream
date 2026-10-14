@@ -257,12 +257,15 @@ class Host:
 
     def serve_usb(self,fps,longest,audio,device_id):
         from usbmux import list_devices,connect_device
+        selected_serial=None
         while not self.stop_event.is_set():
             connection=None
             try:
                 devices=list_devices()
-                if device_id is not None:devices=[d for d in devices if d['DeviceID']==device_id]
+                if selected_serial:devices=[d for d in devices if d.get('Properties',{}).get('SerialNumber')==selected_serial]
+                elif device_id is not None:devices=[d for d in devices if d['DeviceID']==device_id]
                 if len(devices)!=1:raise RuntimeError('Selecione um único iPad USB na lista e abra Aguardar PC no iPad')
+                selected_serial=devices[0].get('Properties',{}).get('SerialNumber')
                 connection=connect_device(devices[0]['DeviceID']);self.pending_connection=connection
                 self.authenticate(connection)
                 self.session=Session(connection,self.pad,fps,longest,audio,self.report,'touch',self.monitor)
@@ -388,6 +391,8 @@ class App:
         self.refresh_screens()
 
     def refresh_screens(self):
+        if self.host.thread and self.host.thread.is_alive():
+            self.state.config(text='Pare a transmissão antes de atualizar a seleção de tela.');return
         try:
             from desktop import monitors
             previous=self.screen.current();self.screens=monitors()
@@ -399,6 +404,8 @@ class App:
         except Exception as exc:self.state.config(text=str(exc))
 
     def refresh_usb(self):
+        if self.host.thread and self.host.thread.is_alive():
+            self.state.config(text='Pare a transmissão antes de selecionar outro iPad.');return
         def work():
             try:
                 from usbmux import list_devices
@@ -423,10 +430,12 @@ class App:
         threading.Thread(target=work,daemon=True).start()
 
     def install_gamepad(self):
+        self.stop()
         from setup_manager import install_gamepad
         self.background("Abrindo o instalador do gamepad incluído no aplicativo…",install_gamepad)
 
     def install_monitor(self):
+        self.stop()
         from setup_manager import monitor_driver
         def install_and_extend():
             result=monitor_driver()
@@ -448,6 +457,7 @@ class App:
         self.background("Preparando o suporte USB Apple pelo Windows. Internet necessária na primeira instalação…",prepare_apple_usb)
 
     def extend(self):
+        self.stop()
         from desktop import extend_desktop
         self.background("Estendendo a área de trabalho…",extend_desktop,True)
 
@@ -460,11 +470,13 @@ class App:
                 device_id=self.usb_devices[self.device.current()]['DeviceID']
             pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode='usb' if usb else 'wifi',monitor=self.screens[self.screen.current()],device_id=device_id)
             self.pin.config(text=' '.join(pin));self.start_button.config(state='disabled')
+            self.screen.config(state='disabled');self.device.config(state='disabled')
             self.state.config(text="USB pronto: informe este PIN no iPad e toque Aguardar PC." if usb else "Wi-Fi pronto: conecte o iPad com o IP e este PIN.")
         except Exception as exc:self.host.stop();messagebox.showerror("Não foi possível iniciar",str(exc))
 
     def stop(self):
         self.host.stop();self.start_button.config(state='normal');self.pin.config(text="— — — — — —")
+        self.screen.config(state='readonly');self.device.config(state='readonly')
 
     def poll(self):
         while not self.messages.empty():
