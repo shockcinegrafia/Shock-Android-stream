@@ -65,6 +65,7 @@ jobs:
           Copy-Item pc-ipad/README.md dist/ShockStream/LEIA-ME.md
           Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
           Copy-Item pc-ipad/REVIEW-0.4.2.md dist/ShockStream/
+          Copy-Item pc-ipad/FEATURES-0.4.3.md dist/ShockStream/
           Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
           python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
           Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip

@@ -19,7 +19,7 @@ import webbrowser
 from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO, NOTICE,
                       LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id, display_orientation)
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -59,7 +59,7 @@ class XboxPad:
             self.neutral()
 
 
-def make_encoder(width, height, fps):
+def make_encoder(width, height, fps, quality='balanced'):
     import av
     from fractions import Fraction
     codec = av.CodecContext.create("libx264", "w")
@@ -67,7 +67,8 @@ def make_encoder(width, height, fps):
     codec.pix_fmt = "yuv420p"
     codec.time_base = Fraction(1, fps)
     codec.framerate = Fraction(fps, 1)
-    codec.bit_rate = 2500000
+    from video_options import bitrate
+    codec.bit_rate = bitrate(quality)
     codec.options = {"preset": "ultrafast", "tune": "zerolatency", "profile": "baseline",
                      "x264-params": "repeat-headers=1:annexb=1:bframes=0:keyint=30:scenecut=0"}
     codec.open()
@@ -76,12 +77,14 @@ def make_encoder(width, height, fps):
 
 class Session:
     def __init__(self, connection, gamepad, fps, size, audio, report, mode="gamepad", monitor=None,
-                 host_id='', client_size=(1024, 768), client_display_id=None, wake_key=None, client_orientation=None):
+                 host_id='', client_size=(1024, 768), client_display_id=None, wake_key=None, client_orientation=None,
+                 show_cursor=True, quality='balanced', metrics=None):
         self.sock = connection
         self.gamepad = gamepad
         self.fps, self.size, self.audio = fps, size, audio
         self.report = report
         self.mode,self.monitor=mode,monitor
+        self.show_cursor=show_cursor;self.quality=quality;self.metrics=metrics
         self.stop = threading.Event()
         self.ack = threading.Event()
         self.latest = LatestFrame()
@@ -101,6 +104,20 @@ class Session:
         self.client_display_id = client_display_id
         self.geometry_ready = threading.Event()
         self.geometry_ready.set()
+
+    def change_monitor(self,monitor):
+        with self.display_lock:
+            self.geometry_ready.clear();self.gamepad.neutral()
+            self.monitor=dict(monitor);self.display_generation+=1
+
+    def configure_video(self,fps,size,quality):
+        from video_options import bitrate
+        bitrate(quality)
+        if fps not in (15,20,30) or size not in (640,800,1024):raise ValueError('Configuração de vídeo inválida')
+        with self.display_lock:
+            if (fps,size,quality)==(self.fps,self.size,self.quality):return
+            self.geometry_ready.clear();self.gamepad.neutral()
+            self.fps,self.size,self.quality=fps,size,quality;self.display_generation+=1
 
     def display_preferences(self, body):
         value = json.loads(body)
@@ -133,21 +150,39 @@ class Session:
         self.gamepad.neutral()
 
     def capture(self):
+        cursor=None
         try:
             import mss
             import numpy as np
+            from contextlib import ExitStack
             from desktop import fit_target, set_ipad_resolution, monitors
-            with mss.mss() as capture:
-                monitor = self.monitor or capture.monitors[1]
+            with ExitStack() as capture_stack:
+                capture=capture_stack.enter_context(mss.mss())
+                monitor = self.monitor or capture.monitors[1];requested=self.monitor
                 previous = None
                 next_geometry_check = 0
-                period = 1 / self.fps
+                cursor_retry_at=0;transient_since=None
                 while not self.stop.is_set():
                     started = time.monotonic()
+                    with self.display_lock:
+                        source=self.monitor;target=self.client_size;generation=self.display_generation
+                        period=1/self.fps;size=self.size
+                    if source is not requested:
+                        monitor=dict(source);requested=source;previous=None;next_geometry_check=0
                     if monitor.get('device') and started >= next_geometry_check:
                         next_geometry_check = started + 1
-                        current = next((m for m in monitors() if m['device']==monitor['device']),None)
-                        if current is None:raise RuntimeError('A tela selecionada foi desconectada')
+                        available=monitors()
+                        current = next((m for m in available if m['device']==monitor['device']),None)
+                        if current is None:
+                            if not available:
+                                if transient_since is None:
+                                    transient_since=started
+                                    with self.display_lock:
+                                        self.geometry_ready.clear();self.gamepad.neutral();self.display_generation+=1
+                                if started-transient_since>3:raise RuntimeError('Nenhuma tela disponível no Windows')
+                                next_geometry_check=0;self.stop.wait(.1);continue
+                            current=next((m for m in available if m['left']==0 and m['top']==0),available[0])
+                            self.change_monitor(current);self.report('Tela removida; continuando no monitor principal.');continue
                         if any(current[k]!=monitor[k] for k in ('left','top','width','height')):
                             with self.display_lock:
                                 self.geometry_ready.clear()
@@ -155,9 +190,7 @@ class Session:
                                 self.display_generation += 1
                             monitor = current
                             previous = None
-                    with self.display_lock:
-                        target = self.client_size
-                        generation = self.display_generation
+                            generation=self.display_generation
                     if target != previous:
                         if monitor.get('virtual'):
                             try:
@@ -168,15 +201,46 @@ class Session:
                             self.gamepad.neutral()
                             self.gamepad.set_monitor(monitor)
                         previous = target
-                    width, height = fit_target(monitor['width'], monitor['height'], *target, self.size)
+                    width, height = fit_target(monitor['width'], monitor['height'], *target, size)
                     rect = {key: monitor[key] for key in ('left', 'top', 'width', 'height')}
-                    image = capture.grab(rect)
+                    try:image = capture.grab(rect)
+                    except (mss.exception.ScreenShotError,OSError):
+                        if transient_since is None:
+                            transient_since=started
+                            with self.display_lock:
+                                self.geometry_ready.clear();self.gamepad.neutral();self.display_generation+=1
+                        if started-transient_since>3:raise
+                        if self.stop.is_set():break
+                        capture.close()
+                        while not self.stop.is_set():
+                            try:
+                                capture=capture_stack.enter_context(mss.mss());break
+                            except (mss.exception.ScreenShotError,OSError):
+                                if time.monotonic()-transient_since>3:raise
+                                self.stop.wait(.1)
+                        next_geometry_check=0;self.stop.wait(.1);continue
+                    transient_since=None
+                    image=np.array(image,dtype=np.uint8,copy=True)
+                    if self.show_cursor and started>=cursor_retry_at:
+                        try:
+                            if cursor is None:
+                                from cursor_capture import CursorRenderer
+                                cursor=CursorRenderer()
+                            cursor.apply(image,rect)
+                        except (OSError,ValueError):
+                            cursor_retry_at=started+2;logging.exception('Cursor overlay unavailable')
+                            if cursor:cursor.close();cursor=None
+                            self.report('Vídeo continua; não foi possível desenhar o ponteiro nesta sessão.')
                     # Copy so the single latest frame owns its backing memory.
-                    self.latest.put((np.array(image, dtype=np.uint8, copy=True), width, height, target, generation))
+                    with self.display_lock:
+                        if source is self.monitor and generation==self.display_generation:
+                            self.latest.put((image, width, height, target, generation))
                     self.stop.wait(max(0, period - (time.monotonic() - started)))
         except Exception as exc:
             self.capture_error = exc
             self.stop.set()
+        finally:
+            if cursor:cursor.close()
 
     def capture_audio(self):
         try:
@@ -203,18 +267,19 @@ class Session:
                 elif kind == PAD and self.mode=="gamepad" and len(body) <= 2048:
                     self.gamepad.apply(json.loads(body))
                 elif kind == TOUCH and self.mode=="touch" and len(body)<=8192:
-                    if self.geometry_ready.is_set():
-                        from touchscreen import TouchInjectionError
-                        try:
-                            self.gamepad.events(json.loads(body))
-                            self.last_input_error = None
-                        except TouchInjectionError as exc:
-                            self.gamepad.neutral()
-                            if self.last_input_error != exc.code:
-                                self.report(str(exc))
-                                logging.warning('Touch injection refused: code %s',exc.code)
-                                self.notices.append({'scope':'input','recoverable':True,'message':str(exc),'code':exc.code})
-                            self.last_input_error = exc.code
+                    with self.display_lock:
+                        if self.geometry_ready.is_set():
+                            from touchscreen import TouchInjectionError
+                            try:
+                                self.gamepad.events(json.loads(body))
+                                self.last_input_error = None
+                            except TouchInjectionError as exc:
+                                self.gamepad.neutral()
+                                if self.last_input_error != exc.code:
+                                    self.report(str(exc))
+                                    logging.warning('Touch injection refused: code %s',exc.code)
+                                    self.notices.append({'scope':'input','recoverable':True,'message':str(exc),'code':exc.code})
+                                self.last_input_error = exc.code
                 elif kind == CLIENT_INFO and len(body) <= 512:
                     self.display_preferences(body)
                 elif kind == HEARTBEAT and not body:
@@ -244,6 +309,8 @@ class Session:
 
     def run(self):
         import av
+        from video_options import StreamStats
+        stats=StreamStats(time.monotonic())
         try:
             capture_thread = threading.Thread(target=self.capture, daemon=True)
             capture_thread.start()
@@ -273,7 +340,8 @@ class Session:
                     image, width, height = raw, self.width, self.height
                     frame_generation = self.display_generation
                 if encoder is None or (width, height) != (self.width, self.height) or not self.geometry_ready.is_set():
-                    candidate = make_encoder(width, height, self.fps)
+                    with self.display_lock:quality=self.quality;fps=self.fps
+                    candidate = make_encoder(width, height, fps) if quality=='balanced' else make_encoder(width,height,fps,quality)
                     with self.display_lock:
                         if frame_generation != self.display_generation:
                             continue
@@ -281,16 +349,20 @@ class Session:
                         encoder = candidate
                         pts = 0
                         self.sock.sendall(packet(INFO, json.dumps(self.info()).encode()))
-                        self.geometry_ready.set()
                     self.report(f"iPad conectado · {width} × {height} · {self.fps} FPS alvo · {self.mode}")
+                encode_started=time.monotonic()
                 frame = av.VideoFrame.from_ndarray(image, format="bgra").reformat(self.width, self.height, format="yuv420p")
                 frame.pts = pts
                 pts += 1
                 encoded = b"".join(bytes(p) for p in encoder.encode(frame))
+                encode_time=time.monotonic()-encode_started
                 if not encoded:
                     raise RuntimeError("O encoder H.264 não produziu um frame imediato")
+                with self.display_lock:
+                    if frame_generation!=self.display_generation:continue
                 # Drop raw captures BEFORE encoding; never drop dependent H.264 packets.
                 self.ack.clear()
+                sent_at=time.monotonic()
                 self.sock.sendall(packet(VIDEO, encoded))
                 deadline = time.monotonic() + 3
                 while not self.stop.is_set() and not self.ack.is_set():
@@ -301,6 +373,11 @@ class Session:
                         raise TimeoutError("O iPad não confirmou a decodificação do vídeo")
                     # Event.wait wakes immediately on ACK; the timeout only services audio.
                     self.ack.wait(min(0.005, remaining))
+                if not self.stop.is_set():
+                    with self.display_lock:
+                        if frame_generation==self.display_generation:self.geometry_ready.set()
+                    sample=stats.record(time.monotonic(),len(encoded),time.monotonic()-sent_at,encode_time)
+                    if sample and self.metrics:self.metrics(sample)
                 self.send_audio()
                 sequence, next_frame = self.latest.take_after(sequence)
                 if next_frame is not None:
@@ -314,8 +391,9 @@ class Session:
 
 
 class Host:
-    def __init__(self, report, identity=None):
+    def __init__(self, report, identity=None, metrics=None):
         self.report = report
+        self.metrics=metrics;self.show_cursor=True;self.quality='balanced';self.video_params=None
         if identity is None:
             from settings import load_settings
             identity = load_settings()
@@ -330,7 +408,10 @@ class Host:
         self.resume_event = threading.Event()
 
     def start(self, fps=30, longest=1024, audio=True, port=8090, mode="auto", monitor=None,
-              device_id=None, input_mode='touch', device_serial=None):
+              device_id=None, input_mode='touch', device_serial=None, show_cursor=True,quality='balanced'):
+        from video_options import bitrate
+        bitrate(quality);self.show_cursor=show_cursor;self.quality=quality
+        self.video_params=(fps,longest,quality)
         if any(worker.is_alive() for worker in self.workers) or (self.advertiser and self.advertiser.thread.is_alive()):
             raise RuntimeError('Aguarde o encerramento da transmissão anterior')
         if mode not in ('auto', 'wifi', 'usb') or input_mode not in ('touch', 'gamepad'):
@@ -360,6 +441,21 @@ class Host:
         for worker in self.workers:
             worker.start()
         return self.pin
+
+    def change_monitor(self,monitor):
+        self.monitor=dict(monitor)
+        if self.session:self.session.change_monitor(monitor)
+
+    def configure_video(self,fps,size,quality):
+        from video_options import bitrate
+        bitrate(quality)
+        if fps not in (15,20,30) or size not in (640,800,1024):raise ValueError('Configuração de vídeo inválida')
+        self.video_params=(fps,size,quality);self.quality=quality
+        if self.session:self.session.configure_video(fps,size,quality)
+
+    def cursor_enabled(self,enabled):
+        self.show_cursor=bool(enabled)
+        if self.session:self.session.show_cursor=self.show_cursor
 
     def authenticate(self, connection):
         import hmac
@@ -399,10 +495,12 @@ class Host:
             if self.stop_event.is_set():
                 return
             client_size = self.authenticate(connection)
+            if self.video_params:fps,longest,self.quality=self.video_params
             self.session = Session(connection, self.pad, fps, longest, audio, self.report,
                                    self.input_mode, self.monitor, self.identity['hostId'], client_size,
                                    self.auth_client_display_id, self.identity.get('wakeKey'),
-                                   client_orientation=self.auth_client_orientation)
+                                   client_orientation=self.auth_client_orientation,show_cursor=self.show_cursor,
+                                   quality=self.quality,metrics=self.metrics)
             self.report('Conexão ' + transport + ' autenticada')
             self.session.run()
         finally:
@@ -545,7 +643,7 @@ class App:
         self.body.bind('<Configure>',lambda e:canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.bind('<Configure>',lambda e:canvas.itemconfigure(window,width=e.width))
         self.root.bind_all('<MouseWheel>',lambda e:canvas.yview_scroll(-int(e.delta/120),'units'))
-        self.messages=queue.Queue();self.host=Host(self.messages.put, self.settings);self.screens=[];self.usb_devices=[]
+        self.messages=queue.Queue();self.host=Host(self.messages.put, self.settings,metrics=self.on_metrics);self.screens=[];self.usb_devices=[]
         self.root.protocol("WM_DELETE_WINDOW",self.hide)
         style=ttk.Style();style.theme_use("clam")
         style.configure("TCombobox",fieldbackground="#243343",foreground="white",padding=6)
@@ -571,6 +669,12 @@ class App:
         self.size=ttk.Combobox(options,values=["1024 px","800 px","640 px"],width=10,state="readonly");self.size.set("1024 px");self.size.pack(side='left',padx=5)
         self.audio=tk.BooleanVar(value=True)
         tk.Checkbutton(options,text="Áudio do PC",variable=self.audio,bg="#101721",fg="white",selectcolor="#243343",activebackground="#101721").pack(side='left',padx=8)
+        self.quality=ttk.Combobox(self.body,values=['Equilibrado · padrão atual','Texto mais nítido · mais dados','Economizar rede · menos dados'],state='readonly',width=40)
+        self.quality.current(max(0,min(2,self.settings.get('videoQuality',0))));self.quality.pack(pady=3)
+        for option in (self.fps,self.size,self.quality):option.bind('<<ComboboxSelected>>',self.video_changed)
+        self.cursor=tk.BooleanVar(value=self.settings.get('showCursor',True))
+        tk.Checkbutton(self.body,text='Mostrar ponteiro do mouse na transmissão',variable=self.cursor,command=self.cursor_changed,bg='#101721',fg='white',selectcolor='#243343',activebackground='#101721').pack(pady=3)
+        self.stats=self.label('Sem transmissão ativa',10,'#a0b4c8',3)
         actions=tk.Frame(self.body,bg="#101721");actions.pack(pady=7)
         self.start_button=self.button(actions,"Iniciar",self.start,True);self.start_button.pack(side='left',padx=8)
         self.button(actions,"Parar",self.stop).pack(side='left',padx=8)
@@ -622,6 +726,7 @@ class App:
         if self.headless:return
         from settings import save_settings
         self.settings.update(transport=self.mode.current(),input=self.control.current(),autoStart=self.auto.get())
+        self.settings.update(showCursor=self.cursor.get(),videoQuality=self.quality.current())
         if self.screen.current()>=0:self.settings['screenDevice']=self.screens[self.screen.current()]['device']
         save_settings(self.settings)
 
@@ -651,24 +756,29 @@ class App:
     def screen_changed(self,event=None):
         self.screen_chosen=True
         self.save_preferences()
-        if any(worker.is_alive() for worker in self.host.workers):
-            self.stop()
-            deadline=time.monotonic()+6
-            def restart():
-                if self.closing:return
-                if any(worker.is_alive() for worker in self.host.workers):
-                    if time.monotonic()<deadline:self.root.after(100,restart)
-                    else:self.state.config(text='Aguarde o encerramento e clique Iniciar para transmitir a tela escolhida.')
-                else:self.start()
-            self.root.after(100,restart)
+        if self.screen.current()>=0:
+            self.host.change_monitor(self.screens[self.screen.current()])
+            self.state.config(text='Tela selecionada. Imagem e touch serão ajustados na conexão atual.')
+
+    def video_changed(self,event=None):
+        quality=('balanced','text','economy')[max(0,self.quality.current())]
+        self.host.configure_video(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),quality)
+        self.save_preferences()
+
+    def cursor_changed(self):
+        self.host.cursor_enabled(self.cursor.get());self.save_preferences()
+
+    def on_metrics(self,value):
+        def apply():
+            if self.host.session:
+                self.stats.config(text=f"{value['fps']:.1f} FPS reais · vídeo {value['mbps']:.2f} Mb/s · resposta {value['ack_ms']:.0f} ms")
+        self.messages.put(apply)
 
     def refresh_screens(self):
-        if self.host.thread and self.host.thread.is_alive():
-            self.state.config(text='Pare a transmissão antes de atualizar a seleção de tela.');return
         try:
             from desktop import monitors
             previous=self.screen.current();self.screens=monitors()
-            self.screen['values']=[f"{'Monitor virtual' if m['virtual'] else 'Tela'} {i+1} · {m['width']}×{m['height']} · {m['adapter']}" for i,m in enumerate(self.screens)]
+            self.screen['values']=[f"{'Monitor principal' if m.get('primary') else 'Monitor virtual' if m['virtual'] else 'Monitor'} {i+1} · {m['width']}×{m['height']} · {m['adapter']}" for i,m in enumerate(self.screens)]
             if self.screens:
                 virtual=next((i for i,m in enumerate(self.screens) if m['virtual']),None)
                 remembered=next((i for i,m in enumerate(self.screens) if m['device']==self.settings.get('screenDevice')),None)
@@ -741,7 +851,6 @@ class App:
         self.background("Preparando o suporte USB Apple pelo Windows. Internet necessária na primeira instalação…",prepare)
 
     def extend(self):
-        self.stop()
         from desktop import ensure_virtual_monitor
         def activate():
             ensure_virtual_monitor();self.messages.put(self.select_virtual)
@@ -751,7 +860,8 @@ class App:
     def select_virtual(self):
         self.screen_chosen=False;self.refresh_screens()
         choice=next((i for i,m in enumerate(self.screens) if m.get('virtual')),None)
-        if choice is not None:self.screen.current(choice);self.save_preferences()
+        if choice is not None:
+            self.screen.current(choice);self.host.change_monitor(self.screens[choice]);self.save_preferences()
 
     def monitor_diagnostic(self):
         from desktop import virtual_monitor_status
@@ -764,7 +874,7 @@ class App:
             if self.device.current()>0:
                 device=self.usb_devices[self.device.current()-1]
                 device_id=device['DeviceID'];device_serial=device.get('Properties',{}).get('SerialNumber')
-            pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode=('auto','wifi','usb')[self.mode.current()],monitor=self.screens[self.screen.current()],device_id=device_id,device_serial=device_serial,input_mode='touch' if self.control.current()==0 else 'gamepad')
+            pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode=('auto','wifi','usb')[self.mode.current()],monitor=self.screens[self.screen.current()],device_id=device_id,device_serial=device_serial,input_mode='touch' if self.control.current()==0 else 'gamepad',show_cursor=self.cursor.get(),quality=('balanced','text','economy')[max(0,self.quality.current())])
             self.save_preferences()
             self.pin.config(text=' '.join(pin));self.start_button.config(state='disabled')
             self.screen.config(state='readonly');self.device.config(state='disabled')
@@ -774,6 +884,7 @@ class App:
 
     def stop(self):
         self.host.stop();self.start_button.config(state='normal');self.pin.config(text="— — — — — —")
+        self.stats.config(text='Sem transmissão ativa')
         self.screen.config(state='readonly');self.device.config(state='readonly')
 
     def poll(self):
@@ -802,6 +913,15 @@ def main():
         from discovery import service_info
         from tray_support import icon_image
         import pystray._win32
+        from cursor_capture import CursorRenderer
+        renderer=CursorRenderer()
+        try:
+            renderer.user.LoadCursorW.argtypes=[ctypes.c_void_p,ctypes.c_void_p];renderer.user.LoadCursorW.restype=ctypes.c_void_p
+            cursor=renderer.user.LoadCursorW(None,ctypes.c_void_p(32512))
+            sample=np.full((64,64,4),128,dtype=np.uint8)
+            assert renderer.draw_icon(sample,dict(left=0,top=0,width=64,height=64),cursor,8,8)
+            assert np.any(sample[:,:,:3]!=128)
+        finally:renderer.close()
         assert icon_image().size==(64,64)
         assert service_info('0'*32,8090,['192.168.1.2']).port==8090
         # Importing vgamepad itself connects to the bus, which is absent on build runners.

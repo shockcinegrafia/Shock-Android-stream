@@ -1,8 +1,12 @@
-# Shock Stream 0.4.2 · monitor touch, USB e gamepad
+# Shock Stream Windows 0.4.3 / iPad 0.4.2 · monitor touch, USB e gamepad
 
 A versão 0.4.2 inclui os clientes Windows e iPad atualizados. A descoberta por UDP 8090 complementa o Bonjour; requer o app novo no iPad e uma rede que permita broadcast. Não garante descoberta em redes isoladas ou com Firewall bloqueando tráfego. Consulte REVIEW-0.4.2.md para os achados da revisão do 0.4.1. A latência física não foi medida.
 
 O programa Windows 11 transmite uma tela do computador para o iPad mini 1, iOS 9 / ARMv7. O pacote **.deb rootful** instala o aplicativo e um auxiliar para solicitar sua abertura pelo USB. O **.ipa** continua disponível para instalação pelo método com jailbreak já utilizado no projeto, com conexão automática enquanto o app está aberto.
+
+## Novidades Windows 0.4.3
+
+Ponteiro nativo do mouse, troca entre monitor principal e virtual sem reconectar, recuperação de mudanças de resolução, perfis de vídeo e indicadores medidos de FPS/resposta. Consulte FEATURES-0.4.3.md. Funciona com o app iPad 0.4.2 já instalado.
 
 ## Começar
 
@@ -38,7 +42,7 @@ Use **Criar segundo monitor** no programa Windows e confirme **Monitor virtual**
 
 **Nova área de trabalho**, na Visão de Tarefas do Windows, organiza janelas em outro desktop e não cria uma segunda tela para o iPad. É necessário o monitor do driver, visível também nas configurações de exibição do Windows. **Verificar monitor** distingue driver ausente, adaptador instalado sem tela ativa e monitor ativo. **Estender área de trabalho** tenta ativar um monitor virtual instalado e inativo, mantendo a tela principal. Se o driver não publicar uma tela, a mensagem orienta reparar a instalação ou reiniciar o PC.
 
-A tela física do PC conserva sua configuração. Se você escolher espelhar uma tela física de proporção diferente, a imagem mantém a proporção e pode ter barras. Para ocupar a tela inteira sem distorção, escolha o monitor virtual de proporção 4:3 na horizontal, ou 3:4 na vertical. É possível arrastar janelas para ele no Windows, como em um segundo monitor. Alterar **Tela transmitida** durante a sessão faz o programa encerrar e reiniciar a captura na nova seleção.
+A tela física do PC conserva sua configuração. Se você escolher espelhar uma tela física de proporção diferente, a imagem mantém a proporção e pode ter barras. Para ocupar a tela inteira sem distorção, escolha o monitor virtual de proporção 4:3 na horizontal, ou 3:4 na vertical. É possível arrastar janelas para ele no Windows, como em um segundo monitor. Alterar **Tela transmitida** atualiza a captura e o touch dentro da conexão existente, sem fechar o socket.
 
 A troca de orientação reinicia o encoder com novos SPS/PPS H.264. A confirmação de geometria identifica a solicitação mais recente do iPad antes de reativar touch. Mudanças de posição/resolução feitas no Windows também são detectadas. Qualidade reduzida de 800/640 px e 20/15 FPS continuam disponíveis; o padrão é 1024 px e 30 FPS.
 
