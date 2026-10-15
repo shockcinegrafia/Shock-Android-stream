@@ -105,12 +105,25 @@ class TouchScreen:
 
     def neutral(self):
         with self.lock:
+            failures=0
             try:
-                if self.contacts:self.inject()
+                if self.contacts:
+                    try:
+                        self.inject()
+                    except (RuntimeError, OSError):
+                        failures+=1
                 for ident in list(self.contacts):
-                    self.inject(ident,UP|CANCELED);del self.contacts[ident]
-            except (RuntimeError,OSError):logging.exception('Touch cancellation refused by Windows')
-            finally:self.contacts.clear();self.last=time.monotonic()
+                    try:
+                        self.inject(ident, UP | CANCELED)
+                    except (RuntimeError, OSError):
+                        failures+=1
+                    self.contacts.pop(ident, None)
+            except (RuntimeError, OSError):
+                logging.exception('Touch cancellation refused by Windows')
+            finally:
+                self.contacts.clear()
+                self.last = time.monotonic()
+                if failures:logging.warning('Windows refused %s touch cancellation calls; local contacts cleared', failures)
 
     def expire(self):
         if self.contacts and time.monotonic()-self.last>0.8:self.neutral()

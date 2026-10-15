@@ -17,9 +17,9 @@ from tkinter import ttk, messagebox
 import webbrowser
 
 from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO, NOTICE,
-                      LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id)
+                      LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id, display_orientation)
 
-VERSION = "0.4.0"
+VERSION = "0.4.2"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -76,7 +76,7 @@ def make_encoder(width, height, fps):
 
 class Session:
     def __init__(self, connection, gamepad, fps, size, audio, report, mode="gamepad", monitor=None,
-                 host_id='', client_size=(1024, 768), client_display_id=None, wake_key=None):
+                 host_id='', client_size=(1024, 768), client_display_id=None, wake_key=None, client_orientation=None):
         self.sock = connection
         self.gamepad = gamepad
         self.fps, self.size, self.audio = fps, size, audio
@@ -96,6 +96,7 @@ class Session:
         self.last_input_error = None
         self.display_lock = threading.Lock()
         self.client_size = client_size
+        self.client_orientation = client_orientation
         self.display_generation = 0
         self.client_display_id = client_display_id
         self.geometry_ready = threading.Event()
@@ -105,17 +106,19 @@ class Session:
         value = json.loads(body)
         size = validate_display(value)
         identity = display_id(value)
+        orientation = display_orientation(value)
         with self.display_lock:
             self.geometry_ready.clear()
             self.gamepad.neutral()
             self.client_size = size
+            self.client_orientation = orientation
             self.display_generation += 1
             self.client_display_id = identity
 
     def info(self):
         return {"version": 1, "appVersion": VERSION, "hostId": self.host_id, "name": socket.gethostname(),
                 "width": self.width, "height": self.height, "fps": self.fps, "audio": self.audio,
-                "displayId": self.client_display_id, "wakeKey": self.wake_key,
+                "displayId": self.client_display_id, "orientation": self.client_orientation, "wakeKey": self.wake_key,
                 "sampleRate": 44100, "channels": 2, "mode": self.mode,
                 "gamepad": "Xbox 360" if self.mode == 'gamepad' else None}
 
@@ -293,9 +296,11 @@ class Session:
                 while not self.stop.is_set() and not self.ack.is_set():
                     self.gamepad.expire()
                     self.send_audio()
-                    if time.monotonic() > deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise TimeoutError("O iPad não confirmou a decodificação do vídeo")
-                    self.ack.wait(0.005)
+                    # Event.wait wakes immediately on ACK; the timeout only services audio.
+                    self.ack.wait(min(0.005, remaining))
                 self.send_audio()
                 sequence, next_frame = self.latest.take_after(sequence)
                 if next_frame is not None:
@@ -371,6 +376,7 @@ class Host:
         import select
         client_size = (1024, 768)
         self.auth_client_display_id = None
+        self.auth_client_orientation = None
         if select.select([connection], [], [], 1)[0]:
             kind, body = read_packet(connection)
             if kind != CLIENT_INFO or len(body) > 512:
@@ -378,6 +384,7 @@ class Host:
             value = json.loads(body)
             client_size = validate_display(value)
             self.auth_client_display_id = display_id(value)
+            self.auth_client_orientation = display_orientation(value)
         connection.settimeout(3)
         return client_size
 
@@ -393,7 +400,9 @@ class Host:
                 return
             client_size = self.authenticate(connection)
             self.session = Session(connection, self.pad, fps, longest, audio, self.report,
-                                   self.input_mode, self.monitor, self.identity['hostId'], client_size, self.auth_client_display_id,self.identity.get('wakeKey'))
+                                   self.input_mode, self.monitor, self.identity['hostId'], client_size,
+                                   self.auth_client_display_id, self.identity.get('wakeKey'),
+                                   client_orientation=self.auth_client_orientation)
             self.report('Conexão ' + transport + ' autenticada')
             self.session.run()
         finally:

@@ -75,11 +75,11 @@
     self.touchSurface=[[TouchView alloc] initWithFrame:self.view.bounds];self.touchSurface.hidden=YES;[self.view addSubview:self.touchSurface];
     __weak StreamController *weakSelf=self;
     self.touchSurface.changed=^(NSArray *events){
-        if(weakSelf.connected&&!weakSelf.suppressInput&&[weakSelf.controlMode isEqual:@"touch"])
+        if(weakSelf.connected&&!weakSelf.suppressInput&&!weakSelf.rotating&&!weakSelf.awaitingGeometry&&[weakSelf.controlMode isEqual:@"touch"])
             [weakSelf.connection sendKind:14 body:[NSJSONSerialization dataWithJSONObject:events options:0 error:nil]];
     };
     self.pad.changed=^(NSDictionary *state){
-        if(weakSelf.connected&&!weakSelf.suppressInput&&[weakSelf.controlMode isEqual:@"gamepad"])[weakSelf.connection sendPad:state];
+        if(weakSelf.connected&&!weakSelf.suppressInput&&!weakSelf.rotating&&!weakSelf.awaitingGeometry&&[weakSelf.controlMode isEqual:@"gamepad"])[weakSelf.connection sendPad:state];
     };
     self.card=[UIView new];self.card.backgroundColor=[UIColor colorWithRed:0.10 green:0.15 blue:0.20 alpha:1];self.card.layer.cornerRadius=20;[self.view addSubview:self.card];
     UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(24,22,382,42)];title.text=@"SHOCK STREAM";title.textColor=[self accent];title.font=[UIFont boldSystemFontOfSize:29];[self.card addSubview:title];
@@ -117,7 +117,11 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(background) name:UIApplicationWillResignActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(foreground) name:UIApplicationDidBecomeActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(orientationChanged) name:UIApplicationDidChangeStatusBarOrientationNotification object:nil];
     [self updateDisplayInfo:self.view.bounds.size];[self foreground];
+}
+- (void)orientationChanged {
+    if(!self.rotating)[self updateDisplayInfo:self.view.bounds.size];
 }
 - (UITextField *)fieldWithPlaceholder:(NSString *)placeholder y:(CGFloat)y {
     UITextField *field=[[UITextField alloc] initWithFrame:CGRectMake(24,y,382,50)];field.placeholder=placeholder;field.backgroundColor=[UIColor whiteColor];field.textColor=[UIColor darkTextColor];field.layer.cornerRadius=8;field.autocorrectionType=UITextAutocorrectionTypeNo;field.autocapitalizationType=UITextAutocapitalizationTypeNone;field.keyboardType=UIKeyboardTypeNumbersAndPunctuation;field.font=[UIFont systemFontOfSize:17];
@@ -137,9 +141,11 @@
     if(width<=0||height<=0)return;
     CGFloat cap=MIN(1,1024/MAX(width,height));
     NSNumber *pixelWidth=@((int)lround(width*cap)),*pixelHeight=@((int)lround(height*cap));
-    if([self.displayInfo[@"width"] isEqual:pixelWidth]&&[self.displayInfo[@"height"] isEqual:pixelHeight])return;
+    NSInteger orientation=[UIApplication sharedApplication].statusBarOrientation;
+    if(orientation<1||orientation>4)return;
+    if([self.displayInfo[@"width"] isEqual:pixelWidth]&&[self.displayInfo[@"height"] isEqual:pixelHeight]&&[self.displayInfo[@"orientation"] isEqual:@(orientation)])return;
     self.displayId++;
-    NSDictionary *info=@{@"width":pixelWidth,@"height":pixelHeight,@"displayId":@(self.displayId)};
+    NSDictionary *info=@{@"width":pixelWidth,@"height":pixelHeight,@"orientation":@(orientation),@"displayId":@(self.displayId)};
     self.displayInfo=info;
     if(self.connected) {
         [self.touchSurface reset];[self.pad neutral];self.awaitingGeometry=YES;self.touchSurface.hidden=YES;
@@ -277,13 +283,13 @@
     NSNumber *confirmedDisplay=info[@"displayId"];
     if((id)confirmedDisplay==[NSNull null])confirmedDisplay=nil;
     BOOL currentDisplay=!confirmedDisplay||([confirmedDisplay isKindOfClass:[NSNumber class]]&&[confirmedDisplay isEqual:self.displayInfo[@"displayId"]]);
-    self.activeAttempt=attempt;self.connection=attempt.connection;self.connected=YES;self.controlMode=mode;self.awaitingGeometry=!currentDisplay;
+    self.activeAttempt=attempt;self.connection=attempt.connection;self.connected=YES;self.controlMode=mode;self.awaitingGeometry=!currentDisplay||self.rotating;
     // Rotation can happen after authentication but before the first session INFO.
     if(!currentDisplay)[self sendDisplayInfo:attempt];
     for(StreamAttempt *other in [self.attempts copy])if(other!=attempt){[other.connection disconnect];[self.attempts removeObject:other];}
     self.touchSurface.videoSize=CGSizeMake(width.doubleValue,height.doubleValue);
     BOOL touch=[mode isEqual:@"touch"];
-    self.card.hidden=YES;self.pad.hidden=touch;self.touchSurface.hidden=!touch||!currentDisplay;self.disconnectButton.hidden=touch;
+    self.card.hidden=YES;self.pad.hidden=touch;self.touchSurface.hidden=!touch||!currentDisplay||self.rotating;self.disconnectButton.hidden=touch;
     [UIApplication sharedApplication].idleTimerDisabled=YES;
     if([info[@"audio"] boolValue]){if(!self.audio)self.audio=[AudioPlayer new];}
     else {[self.audio stop];self.audio=nil;}
@@ -331,6 +337,7 @@
 }
 - (void)keepAlive {
     if(!self.connected)return;
+    if(self.rotating||self.awaitingGeometry){[self.connection sendKind:13 body:nil];return;}
     if([self.controlMode isEqual:@"touch"]) {
         NSArray *held=[self.touchSurface held];
         if(held.count&&!self.awaitingGeometry)[self.connection sendKind:14 body:[NSJSONSerialization dataWithJSONObject:held options:0 error:nil]];
@@ -366,11 +373,14 @@
     self.status.text=@"Procurando o PC…\nNo primeiro acesso, informe o PIN exibido no Windows.";[self tryAutomatic];
 }
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
-    [self.touchSurface reset];[self.pad neutral];self.rotating=YES;[self updateDisplayInfo:size];
+    [self.touchSurface reset];[self.pad neutral];self.rotating=YES;
+    self.awaitingGeometry=YES;self.touchSurface.hidden=YES;
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
     __weak StreamController *weakSelf=self;
     [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context){
-        (void)context;weakSelf.rotating=NO;[weakSelf updateDisplayInfo:weakSelf.view.bounds.size];
+        (void)context;weakSelf.rotating=NO;
+        // Commit final size and orientation together, including a cancelled transition.
+        weakSelf.displayInfo=nil;[weakSelf updateDisplayInfo:weakSelf.view.bounds.size];
     }];
 }
 - (void)foreground {

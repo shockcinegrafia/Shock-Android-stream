@@ -66,6 +66,15 @@ def display_id(value):
     return identity
 
 
+def display_orientation(value):
+    if not isinstance(value, dict):
+        return None
+    orientation = value.get('orientation')
+    if orientation is not None and (isinstance(orientation, bool) or not isinstance(orientation, int) or orientation not in (1, 2, 3, 4)):
+        raise ValueError('Orientação da tela inválida')
+    return orientation
+
+
 def validate_pad(value):
     if not isinstance(value, dict):
         raise ValueError("Estado de controle inválido")

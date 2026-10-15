@@ -19,6 +19,10 @@ jobs:
           mkdir -p build
           clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation -framework Security pc-ipad/wake/main.m -o build/wake-self-test
           build/wake-self-test --self-test
+      - name: Verify native iPad discovery parser without opening network sockets
+        run: |
+          clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation pc-ipad/ios/HostDiscovery.m pc-ipad/tests/HostDiscoveryTests.m -o build/discovery-self-test
+          build/discovery-self-test
   windows:
     runs-on: windows-2022
     timeout-minutes: 20
@@ -60,6 +64,7 @@ jobs:
         run: |
           Copy-Item pc-ipad/README.md dist/ShockStream/LEIA-ME.md
           Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
+          Copy-Item pc-ipad/REVIEW-0.4.2.md dist/ShockStream/
           Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
           python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
           Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
@@ -119,7 +124,7 @@ jobs:
           python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
           HELPER="$(find pc-ipad/wake/.theos/_ -type f -name shockstream-waked -print -quit)"
           test -n "$HELPER"
-          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.4.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
+          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.4.2 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
       - uses: actions/upload-artifact@v4
         with:
           name: ShockStream-iOS9-ARMv7

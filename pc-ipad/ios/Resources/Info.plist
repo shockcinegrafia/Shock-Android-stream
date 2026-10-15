@@ -6,8 +6,8 @@
 <key>CFBundleDisplayName</key><string>Shock Stream</string>
 <key>CFBundleExecutable</key><string>ShockStream</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>8</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleVersion</key><string>10</string>
+<key>CFBundleShortVersionString</key><string>0.4.2</string>
 <key>NSBonjourServices</key><array><string>_shockstream._tcp</string></array>
 <key>NSLocalNetworkUsageDescription</key><string>Encontrar seu PC e transmitir a tela pela rede local.</string>
 <key>MinimumOSVersion</key><string>9.0</string>

@@ -1,4 +1,6 @@
-# Shock Stream 0.4.0 · monitor touch, USB e gamepad
+# Shock Stream 0.4.2 · monitor touch, USB e gamepad
+
+A versão 0.4.2 inclui os clientes Windows e iPad atualizados. A descoberta por UDP 8090 complementa o Bonjour; requer o app novo no iPad e uma rede que permita broadcast. Não garante descoberta em redes isoladas ou com Firewall bloqueando tráfego. Consulte REVIEW-0.4.2.md para os achados da revisão do 0.4.1. A latência física não foi medida.
 
 O programa Windows 11 transmite uma tela do computador para o iPad mini 1, iOS 9 / ARMv7. O pacote **.deb rootful** instala o aplicativo e um auxiliar para solicitar sua abertura pelo USB. O **.ipa** continua disponível para instalação pelo método com jailbreak já utilizado no projeto, com conexão automática enquanto o app está aberto.
 
@@ -20,7 +22,7 @@ Com o ícone do ShockStream disponível na bandeja, fechar a janela pelo X mant�
 
 ## Descoberta pela rede local
 
-Se a rede bloquear multicast/Bonjour, existe o campo de IP manual. Permita o aplicativo na rede privada do Firewall do Windows quando solicitado: vídeo/controles usam TCP 8090; descoberta Bonjour usa UDP 5353. O programa não altera o Firewall sozinho. A descoberta anuncia identidade/nome/endereço/porta, nunca o PIN. Na troca de IP, o host reanuncia as interfaces e o iPad busca os endereços atuais.
+Se a rede bloquear multicast/Bonjour, existe o campo de IP manual. Permita o aplicativo na rede privada do Firewall do Windows quando solicitado: vídeo/controles usam TCP 8090; descoberta usa UDP 5353 e UDP 8090. O programa não altera o Firewall sozinho. A descoberta anuncia identidade/nome/endereço/porta, nunca o PIN. Na troca de IP, o host reanuncia as interfaces e o iPad busca os endereços atuais.
 
 ## Touch sem cobrir a imagem
 
