@@ -12,7 +12,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'windows'))
 from cursor_capture import CursorRenderer,clipped_cursor,CURSORINFO
 from video_options import StreamStats,bitrate
 from host import Session,make_encoder
-from protocol import INFO,VIDEO,ACK,BYE,read_packet,packet
+from protocol import INFO,VIDEO,ACK,BYE,TOUCH,read_packet,packet
 
 class CursorTests(unittest.TestCase):
     def test_hotspot_negative_monitor_and_clipping(self):
@@ -67,6 +67,17 @@ class CursorTests(unittest.TestCase):
         self.assertIsNone(stats.record(3,1,.001,.001))
 
 class LiveMonitorTests(unittest.TestCase):
+    def test_quality_and_fps_change_does_not_drop_touch_up(self):
+        left,right=socket.socketpair();touch=Mock()
+        session=Session(left,touch,30,1024,False,lambda _:None,'touch',show_cursor=False)
+        session.configure_video(20,1024,'text');touch.neutral.assert_not_called()
+        events=[dict(id=0,a='up',x=.5,y=.5)]
+        worker=threading.Thread(target=session.receive);worker.start()
+        try:
+            right.sendall(packet(TOUCH,json.dumps(events).encode())+packet(BYE))
+            worker.join(2);self.assertFalse(worker.is_alive());touch.events.assert_called_once_with(events)
+        finally:session.close();right.close();worker.join(2)
+
     def test_capture_recovers_display_change_and_refreshes_touch_rectangle(self):
         from mss.exception import ScreenShotError
         from types import SimpleNamespace
@@ -126,6 +137,7 @@ class LiveMonitorTests(unittest.TestCase):
                 kind,body=read_packet(right);self.assertEqual(kind,VIDEO)
                 frame=av.CodecContext.create('h264','r').decode(av.Packet(body))[0]
                 self.assertEqual((frame.width,frame.height),(96,64));self.assertFalse(session.geometry_ready.is_set())
+                self.assertFalse(session.input_ready.is_set())
                 right.sendall(packet(ACK));self.assertTrue(session.geometry_ready.wait(2));touch.set_monitor.assert_called_with(primary)
                 session.configure_video(20,640,'text')
                 info=next_info();self.assertEqual(info['fps'],20);self.assertEqual(read_packet(right)[0],VIDEO)

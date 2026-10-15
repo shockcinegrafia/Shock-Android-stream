@@ -30,6 +30,6 @@ O indicador no PC mostra FPS de frames entregues/confirmados, taxa de vídeo e t
 
 ## Validação
 
-135 testes Python terminaram sem falhas nesta máquina, com 7 checks POSIX/Linux ignorados no Windows. Os testes novos verificam desenho nativo do cursor em memória sem mover o mouse, recorte em bordas, perfis H.264, cálculo dos indicadores, recuperação de falha de captura e mudança de posição/resolução. Um teste completo alterna virtual → principal → virtual e muda o perfil pela mesma conexão TCP; verifica o decoder e o bloqueio do touch até o ACK.
+136 testes Python terminaram sem falhas nesta máquina, com 7 checks POSIX/Linux ignorados no Windows. Os testes novos verificam desenho nativo do cursor em memória sem mover o mouse, recorte em bordas, perfis H.264, cálculo dos indicadores, recuperação de falha de captura e mudança de posição/resolução. Um teste completo alterna virtual → principal → virtual e muda o perfil pela mesma conexão TCP; verifica o decoder e o bloqueio do touch até o ACK.
 
 O self-test da versão fonte e do executável empacotado também desenha um cursor nativo em memória. CI continua validando os clientes legados e os pacotes. A verificação não instala drivers, não muda monitores reais e não injeta input na área de trabalho do usuário. O funcionamento no iPad físico ainda precisa ser conferido após a atualização Windows.

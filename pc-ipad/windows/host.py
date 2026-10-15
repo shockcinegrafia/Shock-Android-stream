@@ -104,10 +104,11 @@ class Session:
         self.client_display_id = client_display_id
         self.geometry_ready = threading.Event()
         self.geometry_ready.set()
+        self.input_ready=threading.Event();self.input_ready.set()
 
     def change_monitor(self,monitor):
         with self.display_lock:
-            self.geometry_ready.clear();self.gamepad.neutral()
+            self.geometry_ready.clear();self.input_ready.clear();self.gamepad.neutral()
             self.monitor=dict(monitor);self.display_generation+=1
 
     def configure_video(self,fps,size,quality):
@@ -116,7 +117,8 @@ class Session:
         if fps not in (15,20,30) or size not in (640,800,1024):raise ValueError('Configuração de vídeo inválida')
         with self.display_lock:
             if (fps,size,quality)==(self.fps,self.size,self.quality):return
-            self.geometry_ready.clear();self.gamepad.neutral()
+            self.geometry_ready.clear()
+            if size!=self.size:self.input_ready.clear();self.gamepad.neutral()
             self.fps,self.size,self.quality=fps,size,quality;self.display_generation+=1
 
     def display_preferences(self, body):
@@ -126,6 +128,7 @@ class Session:
         orientation = display_orientation(value)
         with self.display_lock:
             self.geometry_ready.clear()
+            self.input_ready.clear()
             self.gamepad.neutral()
             self.client_size = size
             self.client_orientation = orientation
@@ -178,7 +181,7 @@ class Session:
                                 if transient_since is None:
                                     transient_since=started
                                     with self.display_lock:
-                                        self.geometry_ready.clear();self.gamepad.neutral();self.display_generation+=1
+                                        self.geometry_ready.clear();self.input_ready.clear();self.gamepad.neutral();self.display_generation+=1
                                 if started-transient_since>3:raise RuntimeError('Nenhuma tela disponível no Windows')
                                 next_geometry_check=0;self.stop.wait(.1);continue
                             current=next((m for m in available if m['left']==0 and m['top']==0),available[0])
@@ -186,6 +189,7 @@ class Session:
                         if any(current[k]!=monitor[k] for k in ('left','top','width','height')):
                             with self.display_lock:
                                 self.geometry_ready.clear()
+                                self.input_ready.clear()
                                 self.gamepad.neutral()
                                 self.display_generation += 1
                             monitor = current
@@ -208,7 +212,7 @@ class Session:
                         if transient_since is None:
                             transient_since=started
                             with self.display_lock:
-                                self.geometry_ready.clear();self.gamepad.neutral();self.display_generation+=1
+                                self.geometry_ready.clear();self.input_ready.clear();self.gamepad.neutral();self.display_generation+=1
                         if started-transient_since>3:raise
                         if self.stop.is_set():break
                         capture.close()
@@ -268,7 +272,7 @@ class Session:
                     self.gamepad.apply(json.loads(body))
                 elif kind == TOUCH and self.mode=="touch" and len(body)<=8192:
                     with self.display_lock:
-                        if self.geometry_ready.is_set():
+                        if self.input_ready.is_set():
                             from touchscreen import TouchInjectionError
                             try:
                                 self.gamepad.events(json.loads(body))
@@ -375,7 +379,8 @@ class Session:
                     self.ack.wait(min(0.005, remaining))
                 if not self.stop.is_set():
                     with self.display_lock:
-                        if frame_generation==self.display_generation:self.geometry_ready.set()
+                        if frame_generation==self.display_generation:
+                            self.geometry_ready.set();self.input_ready.set()
                     sample=stats.record(time.monotonic(),len(encoded),time.monotonic()-sent_at,encode_time)
                     if sample and self.metrics:self.metrics(sample)
                 self.send_audio()
