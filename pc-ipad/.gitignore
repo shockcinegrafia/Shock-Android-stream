@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+ios/.theos/
+ios/packages/
+ios/Resources/*.png
+drivers/
