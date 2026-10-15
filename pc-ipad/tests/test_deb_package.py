@@ -149,7 +149,7 @@ class DebVerificationTests(DebFixture):
         self.assertEqual(result['version'],'0.4.0-17')
 
 
-@unittest.skipUnless(shutil.which('sh'),'POSIX shell required for harmless maintainer script simulations')
+@unittest.skipUnless(os.name!='nt' and shutil.which('sh'),'Native POSIX shell required for isolated maintainer script simulations')
 class MaintainerScriptTests(DebFixture):
     def setUp(self):
         super().setUp();self.bin=self.folder/'bin';self.bin.mkdir();self.trace=self.folder/'trace'
