@@ -16,10 +16,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import webbrowser
 
-from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO,
+from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO, NOTICE,
                       LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id)
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -76,7 +76,7 @@ def make_encoder(width, height, fps):
 
 class Session:
     def __init__(self, connection, gamepad, fps, size, audio, report, mode="gamepad", monitor=None,
-                 host_id='', client_size=(1024, 768), client_display_id=None):
+                 host_id='', client_size=(1024, 768), client_display_id=None, wake_key=None):
         self.sock = connection
         self.gamepad = gamepad
         self.fps, self.size, self.audio = fps, size, audio
@@ -91,6 +91,9 @@ class Session:
         self.threads = []
         self.width = self.height = 0
         self.host_id = host_id
+        self.wake_key = wake_key
+        self.notices = collections.deque(maxlen=1)
+        self.last_input_error = None
         self.display_lock = threading.Lock()
         self.client_size = client_size
         self.display_generation = 0
@@ -112,7 +115,7 @@ class Session:
     def info(self):
         return {"version": 1, "appVersion": VERSION, "hostId": self.host_id, "name": socket.gethostname(),
                 "width": self.width, "height": self.height, "fps": self.fps, "audio": self.audio,
-                "displayId": self.client_display_id,
+                "displayId": self.client_display_id, "wakeKey": self.wake_key,
                 "sampleRate": 44100, "channels": 2, "mode": self.mode,
                 "gamepad": "Xbox 360" if self.mode == 'gamepad' else None}
 
@@ -198,7 +201,17 @@ class Session:
                     self.gamepad.apply(json.loads(body))
                 elif kind == TOUCH and self.mode=="touch" and len(body)<=8192:
                     if self.geometry_ready.is_set():
-                        self.gamepad.events(json.loads(body))
+                        from touchscreen import TouchInjectionError
+                        try:
+                            self.gamepad.events(json.loads(body))
+                            self.last_input_error = None
+                        except TouchInjectionError as exc:
+                            self.gamepad.neutral()
+                            if self.last_input_error != exc.code:
+                                self.report(str(exc))
+                                logging.warning('Touch injection refused: code %s',exc.code)
+                                self.notices.append({'scope':'input','recoverable':True,'message':str(exc),'code':exc.code})
+                            self.last_input_error = exc.code
                 elif kind == CLIENT_INFO and len(body) <= 512:
                     self.display_preferences(body)
                 elif kind == HEARTBEAT and not body:
@@ -215,6 +228,8 @@ class Session:
             self.gamepad.neutral()
 
     def send_audio(self):
+        if self.notices:
+            self.sock.sendall(packet(NOTICE,json.dumps(self.notices.popleft()).encode()))
         with self.audio_lock:
             audio = self.audio_frames.popleft() if self.audio_frames else None
         if audio:
@@ -307,6 +322,7 @@ class Host:
         self.active_lock = threading.Lock()
         self.connections_lock = threading.Lock()
         self.connections = set()
+        self.resume_event = threading.Event()
 
     def start(self, fps=30, longest=1024, audio=True, port=8090, mode="auto", monitor=None,
               device_id=None, input_mode='touch', device_serial=None):
@@ -320,6 +336,7 @@ class Host:
         else:
             self.pad = XboxPad()
         self.input_mode, self.monitor = input_mode, monitor
+        self.resume_event.clear()
         self.stop_event.clear()
         self.workers = []
         if mode in ('auto', 'wifi'):
@@ -376,7 +393,7 @@ class Host:
                 return
             client_size = self.authenticate(connection)
             self.session = Session(connection, self.pad, fps, longest, audio, self.report,
-                                   self.input_mode, self.monitor, self.identity['hostId'], client_size, self.auth_client_display_id)
+                                   self.input_mode, self.monitor, self.identity['hostId'], client_size, self.auth_client_display_id,self.identity.get('wakeKey'))
             self.report('Conexão ' + transport + ' autenticada')
             self.session.run()
         finally:
@@ -389,9 +406,20 @@ class Host:
 
     def serve_usb(self, fps, longest, audio, device_id, selected_serial=None):
         from usbmux import list_devices, connect_device
+        from wake import RetryBudget,request_usb,AUTO,RESUME
+        from usb_presence import apple_usb_present,AttachmentTracker
         previous_error = None
+        budget=RetryBudget();attachment=AttachmentTracker();attachment_epoch=0
+        pending_attachment=False
         while not self.stop_event.is_set():
             try:
+                present=apple_usb_present(selected_serial)
+                new_attachment=attachment.observe(present)
+                if new_attachment:
+                    attachment_epoch+=1
+                    pending_attachment=True
+                elif present is False:
+                    pending_attachment=False
                 if self.active_lock.locked():
                     self.stop_event.wait(1)
                     continue
@@ -405,8 +433,35 @@ class Host:
                 if len(devices) != 1:
                     raise RuntimeError('Há vários aparelhos USB. Selecione o iPad na lista.')
                 selected_serial = devices[0].get('Properties', {}).get('SerialNumber')
-                connection = connect_device(devices[0]['DeviceID'])
+                current_device=(selected_serial,devices[0]['DeviceID'])
+                budget.reset((current_device,attachment_epoch))
+                try:
+                    connection = connect_device(devices[0]['DeviceID'])
+                except (ConnectionError,RuntimeError,OSError) as stream_error:
+                    explicit=self.resume_event.is_set() or pending_attachment
+                    if not self.identity.get('wakeKey') or not budget.allow(explicit=explicit):
+                        raise stream_error
+                    self.resume_event.clear()
+                    result=request_usb(devices[0]['DeviceID'],self.identity,RESUME if explicit else AUTO)
+                    state=result['status']
+                    if state not in ('launch_requested','already_active'):
+                        if state in ('locked','paused'):
+                            budget.attempts=max(0,budget.attempts-1)
+                        messages={'paused':'Abertura automática pausada no iPad. Use Retomar iPad ou ative a opção no aplicativo.',
+                                  'locked':'Desbloqueie o iPad para abrir o Shock Stream.',
+                                  'unsupported':'O iOS não disponibilizou a abertura automática; abra o aplicativo manualmente.',
+                                  'launch_failed':'O iOS recusou abrir o aplicativo. Consulte Diagnóstico no iPad e abra manualmente.'}
+                        raise RuntimeError(messages.get(state,'Abra o app no iPad e emparelhe uma vez.'))
+                    pending_attachment=False
+                    self.report('Solicitação de abertura enviada ao iPad; aguardando o aplicativo…')
+                    connection=None;deadline=time.monotonic()+5
+                    while not self.stop_event.is_set() and time.monotonic()<deadline:
+                        try:connection=connect_device(devices[0]['DeviceID']);break
+                        except (ConnectionError,RuntimeError,OSError):self.stop_event.wait(.25)
+                    if connection is None:raise RuntimeError('O app ainda não confirmou a abertura. Abra-o no iPad ou consulte o Diagnóstico.')
                 previous_error = None
+                pending_attachment=False
+                self.resume_event.clear()
                 self.run_connection(connection, fps, longest, audio, 'USB')
             except Exception as exc:
                 message = str(exc)
@@ -434,6 +489,7 @@ class Host:
 
     def stop(self):
         self.stop_event.set()
+        self.resume_event.clear()
         if self.advertiser:
             self.advertiser.close()
             if not self.advertiser.thread.is_alive():self.advertiser = None
@@ -458,9 +514,12 @@ def local_addresses():
 
 
 class App:
-    def __init__(self,headless=False):
+    def __init__(self,headless=False,background=False):
         from settings import load_settings
         self.headless = headless
+        self.tray=None
+        self.closing=False
+        self.screen_chosen=False
         self.settings = {'hostId':'0'*32, 'pin':'123456'} if headless else load_settings()
         from desktop import dpi_aware
         dpi_aware()
@@ -478,7 +537,7 @@ class App:
         canvas.bind('<Configure>',lambda e:canvas.itemconfigure(window,width=e.width))
         self.root.bind_all('<MouseWheel>',lambda e:canvas.yview_scroll(-int(e.delta/120),'units'))
         self.messages=queue.Queue();self.host=Host(self.messages.put, self.settings);self.screens=[];self.usb_devices=[]
-        self.root.protocol("WM_DELETE_WINDOW",self.quit)
+        self.root.protocol("WM_DELETE_WINDOW",self.hide)
         style=ttk.Style();style.theme_use("clam")
         style.configure("TCombobox",fieldbackground="#243343",foreground="white",padding=6)
         self.label("SHOCK STREAM",25,"#4ce2bc",(16,4))
@@ -493,6 +552,7 @@ class App:
         self.label("Tela transmitida",11,"#becbd8",2)
         screenrow=tk.Frame(self.body,bg="#101721");screenrow.pack(pady=4)
         self.screen=ttk.Combobox(screenrow,state="readonly",width=62);self.screen.pack(side='left',padx=4)
+        self.screen.bind('<<ComboboxSelected>>',self.screen_changed)
         self.button(screenrow,"Atualizar",self.refresh_screens).pack(side='left')
         self.usbrow=tk.Frame(self.body,bg="#101721")
         self.device=ttk.Combobox(self.usbrow,state="readonly",width=50);self.device.pack(side='left',padx=4)
@@ -505,8 +565,13 @@ class App:
         actions=tk.Frame(self.body,bg="#101721");actions.pack(pady=7)
         self.start_button=self.button(actions,"Iniciar",self.start,True);self.start_button.pack(side='left',padx=8)
         self.button(actions,"Parar",self.stop).pack(side='left',padx=8)
+        self.button(actions,"Retomar iPad USB",self.resume_ipad).pack(side='left',padx=8)
+        self.button(actions,"Sair",self.quit).pack(side='left',padx=8)
         self.auto=tk.BooleanVar(value=self.settings.get('autoStart',True))
         tk.Checkbutton(self.body,text="Ficar pronto para conectar ao abrir este programa",variable=self.auto,command=self.save_preferences,bg="#101721",fg="white",selectcolor="#243343",activebackground="#101721").pack(pady=3)
+        from tray_support import startup_enabled
+        self.login_start=tk.BooleanVar(value=False if headless else startup_enabled())
+        tk.Checkbutton(self.body,text="Iniciar com o Windows e ficar na bandeja",variable=self.login_start,command=self.toggle_startup,bg="#101721",fg="white",selectcolor="#243343",activebackground="#101721").pack(pady=3)
         self.state=self.label("Prepare o suporte Apple para USB e o monitor virtual para preencher toda a tela.",11,"#a0b4c8",8)
         self.label("Preparação pelo aplicativo",13,"#4ce2bc",5)
         drivers=tk.Frame(self.body,bg="#101721");drivers.pack(pady=5)
@@ -516,8 +581,15 @@ class App:
         display=tk.Frame(self.body,bg="#101721");display.pack(pady=5)
         self.button(display,"Estender área de trabalho",self.extend).pack(side='left',padx=5)
         self.button(display,"Remover monitor virtual",self.remove_monitor).pack(side='left',padx=5)
+        self.button(display,"Verificar monitor",self.monitor_diagnostic).pack(side='left',padx=5)
         self.label("Instaladores incluídos · suporte Apple preparado pelo Windows · autorização do Windows quando necessária",9,"#a0b4c8",6)
         self.mode_changed();self.root.after(100,self.poll)
+        if not headless:
+            try:
+                from tray_support import Tray
+                self.tray=Tray(self.messages.put,self.show,self.resume_ipad,self.stop,self.quit)
+                if background:self.root.after(500,lambda:self.hide(background=True))
+            except Exception as exc:self.messages.put('Bandeja indisponível: '+str(exc))
         if not headless and self.auto.get():self.root.after(500,self.start)
 
     def label(self,text,size,color,pady):
@@ -544,6 +616,43 @@ class App:
         if self.screen.current()>=0:self.settings['screenDevice']=self.screens[self.screen.current()]['device']
         save_settings(self.settings)
 
+    def toggle_startup(self):
+        try:
+            from tray_support import set_startup
+            set_startup(self.login_start.get())
+            if self.login_start.get():self.auto.set(True);self.save_preferences()
+            self.state.config(text='Inicialização com o Windows atualizada. Mantenha o programa nesta pasta.')
+        except Exception as exc:
+            self.login_start.set(not self.login_start.get());messagebox.showerror('Inicialização do Windows',str(exc))
+
+    def show(self):
+        self.root.deiconify();self.root.lift()
+
+    def hide(self,background=False):
+        if self.tray and self.tray.ready.is_set():self.root.withdraw()
+        elif background:self.show()
+        else:self.quit()
+
+    def resume_ipad(self):
+        if self.mode.current()==1:self.mode.current(0);self.mode_changed()
+        if not any(worker.is_alive() for worker in self.host.workers):self.start()
+        self.host.resume_event.set()
+        self.state.config(text='Retomada USB solicitada. O iPad deve estar emparelhado e com abertura automática ativada.')
+
+    def screen_changed(self,event=None):
+        self.screen_chosen=True
+        self.save_preferences()
+        if any(worker.is_alive() for worker in self.host.workers):
+            self.stop()
+            deadline=time.monotonic()+6
+            def restart():
+                if self.closing:return
+                if any(worker.is_alive() for worker in self.host.workers):
+                    if time.monotonic()<deadline:self.root.after(100,restart)
+                    else:self.state.config(text='Aguarde o encerramento e clique Iniciar para transmitir a tela escolhida.')
+                else:self.start()
+            self.root.after(100,restart)
+
     def refresh_screens(self):
         if self.host.thread and self.host.thread.is_alive():
             self.state.config(text='Pare a transmissão antes de atualizar a seleção de tela.');return
@@ -554,8 +663,10 @@ class App:
             if self.screens:
                 virtual=next((i for i,m in enumerate(self.screens) if m['virtual']),None)
                 remembered=next((i for i,m in enumerate(self.screens) if m['device']==self.settings.get('screenDevice')),None)
-                choice=remembered if remembered is not None else virtual if self.control.current()==0 and virtual is not None else max(0,min(previous,len(self.screens)-1))
+                choice=remembered if self.screen_chosen and remembered is not None else virtual if self.control.current()==0 and virtual is not None else max(0,min(previous,len(self.screens)-1))
                 self.screen.current(choice)
+                if virtual is None and self.control.current()==0:
+                    self.state.config(text='Somente tela física disponível: ela pode ter proporção wide. Criar segundo monitor fornece 1024×768; Nova área de trabalho do Windows não cria monitor.')
         except Exception as exc:self.state.config(text=str(exc))
 
     def refresh_usb(self):
@@ -596,10 +707,13 @@ class App:
         def install_and_extend():
             result=monitor_driver()
             if result==0:
-                from desktop import monitors,extend_desktop
-                for _ in range(10):
-                    if any(m['virtual'] for m in monitors()):extend_desktop();break
+                from desktop import ensure_virtual_monitor
+                for attempt in range(10):
+                    try:ensure_virtual_monitor();break
+                    except RuntimeError:
+                        if attempt==9:raise
                     time.sleep(0.5)
+                self.messages.put(self.select_virtual)
             return result
         self.background("O Windows solicitará autorização para instalar o monitor virtual…",install_and_extend,True)
 
@@ -619,8 +733,20 @@ class App:
 
     def extend(self):
         self.stop()
-        from desktop import extend_desktop
-        self.background("Estendendo a área de trabalho…",extend_desktop,True)
+        from desktop import ensure_virtual_monitor
+        def activate():
+            ensure_virtual_monitor();self.messages.put(self.select_virtual)
+            return 'Monitor virtual ativo. Ele será ajustado à proporção do iPad ao conectar.'
+        self.background("Ativando o monitor virtual como segunda tela…",activate,True)
+
+    def select_virtual(self):
+        self.screen_chosen=False;self.refresh_screens()
+        choice=next((i for i,m in enumerate(self.screens) if m.get('virtual')),None)
+        if choice is not None:self.screen.current(choice);self.save_preferences()
+
+    def monitor_diagnostic(self):
+        from desktop import virtual_monitor_status
+        self.background('Verificando telas e driver do monitor virtual…',lambda:virtual_monitor_status()['message'])
 
     def start(self):
         try:
@@ -632,8 +758,9 @@ class App:
             pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode=('auto','wifi','usb')[self.mode.current()],monitor=self.screens[self.screen.current()],device_id=device_id,device_serial=device_serial,input_mode='touch' if self.control.current()==0 else 'gamepad')
             self.save_preferences()
             self.pin.config(text=' '.join(pin));self.start_button.config(state='disabled')
-            self.screen.config(state='disabled');self.device.config(state='disabled')
-            self.state.config(text="Pronto. Abra o app no iPad e informe o PIN uma vez. O monitor virtual preenche 1024×768.")
+            self.screen.config(state='readonly');self.device.config(state='disabled')
+            selected=self.screens[self.screen.current()]
+            self.state.config(text="Pronto. O monitor virtual acompanhará 1024×768 ou 768×1024 do iPad." if selected.get('virtual') else "Espelhando tela física: a proporção original pode deixar barras. Use Criar segundo monitor para uma área 4:3 completa no iPad.")
         except Exception as exc:self.host.stop();messagebox.showerror("Não foi possível iniciar",str(exc))
 
     def stop(self):
@@ -647,18 +774,26 @@ class App:
             else:self.state.config(text=message)
         self.root.after(100,self.poll)
 
-    def quit(self):self.host.stop();self.root.destroy()
+    def quit(self):
+        if self.closing:return
+        self.closing=True;self.host.stop()
+        if self.tray:self.tray.stop()
+        self.root.destroy()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         import av
         import numpy as np
         import mss, soundcard, importlib.util, ctypes
         from discovery import service_info
+        from tray_support import icon_image
+        import pystray._win32
+        assert icon_image().size==(64,64)
         assert service_info('0'*32,8090,['192.168.1.2']).port==8090
         # Importing vgamepad itself connects to the bus, which is absent on build runners.
         spec = importlib.util.find_spec('vgamepad')
@@ -685,8 +820,13 @@ def main():
         return
     folder = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ShockStream"
     folder.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(filename=folder / "host.log", level=logging.INFO, format="%(asctime)s %(message)s")
-    App().root.mainloop()
+    logging.basicConfig(filename=folder / "host.log", level=logging.INFO, format="%(asctime)s %(message)s",encoding='utf-8')
+    from tray_support import InstanceGuard
+    instance=InstanceGuard()
+    try:
+        if instance.owner:App(background=args.background).root.mainloop()
+        elif not args.background:instance.show_existing()
+    finally:instance.close()
 
 
 if __name__ == "__main__":

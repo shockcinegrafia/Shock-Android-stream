@@ -21,6 +21,9 @@ def load_settings(path=None):
     if not isinstance(value.get('pin'), str) or len(value['pin']) != 6 or not value['pin'].isascii() or not value['pin'].isdigit():
         value['pin'] = f'{secrets.randbelow(1000000):06d}'
         changed = True
+    if not isinstance(value.get('wakeKey'),str) or len(value['wakeKey'])!=64 or any(c not in '0123456789abcdef' for c in value['wakeKey']):
+        value['wakeKey'] = secrets.token_hex(32)
+        changed = True
     if changed:
         save_settings(value, path)
     return value

@@ -10,6 +10,7 @@ assert dll.is_file()
 PyInstaller.__main__.run([
     '--noconfirm','--clean','--onedir','--windowed','--name','ShockStream',
     '--collect-all','av','--collect-all','soundcard','--collect-all','zeroconf','--hidden-import','_cffi_backend',
+    '--hidden-import','pystray._win32','--collect-all','PIL',
     '--add-binary',str(dll)+';vgamepad/win/vigem/client/x64',
     '--add-binary',str(Path('build/DriverSetup.exe').resolve())+';.',
     '--add-data',str(Path('pc-ipad/drivers').resolve())+';drivers',

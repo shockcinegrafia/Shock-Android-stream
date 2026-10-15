@@ -1,6 +1,7 @@
 #import "StreamController.h"
 #import "StreamConnection.h"
 #import "HostDiscovery.h"
+#import "WakeBridge.h"
 #import "H264Decoder.h"
 #import "AudioPlayer.h"
 #import "GamepadView.h"
@@ -8,6 +9,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #include <math.h>
+#include <notify.h>
 
 @interface StreamAttempt : NSObject
 @property(nonatomic,strong) StreamConnection *connection;
@@ -34,6 +36,9 @@
 @property(nonatomic,strong) UISegmentedControl *mode;
 @property(nonatomic,strong) UIButton *connectButton;
 @property(nonatomic,strong) UIButton *disconnectButton;
+@property(nonatomic,strong) UIButton *wakeButton;
+@property(nonatomic,strong) UILabel *wakeStatus;
+@property(nonatomic,strong) WakeBridge *wakeBridge;
 @property(atomic,strong) StreamConnection *connection;
 @property(atomic,strong) AudioPlayer *audio;
 @property(nonatomic,strong) StreamAttempt *activeAttempt;
@@ -54,6 +59,8 @@
 @property(nonatomic) BOOL awaitingGeometry;
 @property(nonatomic) BOOL rotating;
 @property(nonatomic) NSUInteger displayId;
+@property(nonatomic) BOOL suppressInput;
+@property(nonatomic,copy) NSString *lastInputNotice;
 @end
 
 @implementation StreamController
@@ -68,11 +75,11 @@
     self.touchSurface=[[TouchView alloc] initWithFrame:self.view.bounds];self.touchSurface.hidden=YES;[self.view addSubview:self.touchSurface];
     __weak StreamController *weakSelf=self;
     self.touchSurface.changed=^(NSArray *events){
-        if(weakSelf.connected&&[weakSelf.controlMode isEqual:@"touch"])
+        if(weakSelf.connected&&!weakSelf.suppressInput&&[weakSelf.controlMode isEqual:@"touch"])
             [weakSelf.connection sendKind:14 body:[NSJSONSerialization dataWithJSONObject:events options:0 error:nil]];
     };
     self.pad.changed=^(NSDictionary *state){
-        if(weakSelf.connected&&[weakSelf.controlMode isEqual:@"gamepad"])[weakSelf.connection sendPad:state];
+        if(weakSelf.connected&&!weakSelf.suppressInput&&[weakSelf.controlMode isEqual:@"gamepad"])[weakSelf.connection sendPad:state];
     };
     self.card=[UIView new];self.card.backgroundColor=[UIColor colorWithRed:0.10 green:0.15 blue:0.20 alpha:1];self.card.layer.cornerRadius=20;[self.view addSubview:self.card];
     UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(24,22,382,42)];title.text=@"SHOCK STREAM";title.textColor=[self accent];title.font=[UIFont boldSystemFontOfSize:29];[self.card addSubview:title];
@@ -90,7 +97,18 @@
     self.connectButton=[UIButton buttonWithType:UIButtonTypeSystem];self.connectButton.frame=CGRectMake(24,317,382,48);self.connectButton.backgroundColor=[self accent];self.connectButton.layer.cornerRadius=10;
     [self.connectButton setTitle:@"Conectar / emparelhar" forState:UIControlStateNormal];[self.connectButton setTitleColor:self.view.backgroundColor forState:UIControlStateNormal];self.connectButton.titleLabel.font=[UIFont boldSystemFontOfSize:18];
     [self.connectButton addTarget:self action:@selector(connect) forControlEvents:UIControlEventTouchUpInside];[self.card addSubview:self.connectButton];
-    self.status=[[UILabel alloc] initWithFrame:CGRectMake(24,380,382,78)];self.status.text=@"Procurando o PC pelo Wi-Fi…\nJá emparelhado? Conecte o cabo ou aguarde.\nTouch ou gamepad são escolhidos no PC.";self.status.numberOfLines=4;self.status.textColor=[UIColor lightGrayColor];self.status.font=[UIFont systemFontOfSize:14];[self.card addSubview:self.status];
+    self.wakeBridge=[WakeBridge new];
+    self.wakeBridge.changed=^{[weakSelf updateWakeUI];};
+    self.wakeBridge.wake=^(NSString *hostId){
+        if(!weakSelf.active)return;
+        weakSelf.selectedHostId=hostId;weakSelf.autoEnabled=YES;[weakSelf.blockedPins removeAllObjects];[weakSelf tryAutomatic];
+    };
+    self.wakeButton=[UIButton buttonWithType:UIButtonTypeSystem];self.wakeButton.frame=CGRectMake(24,375,382,36);self.wakeButton.tintColor=[self accent];
+    [self.wakeButton addTarget:self action:@selector(toggleWake) forControlEvents:UIControlEventTouchUpInside];[self.card addSubview:self.wakeButton];
+    UIButton *diagnostic=[UIButton buttonWithType:UIButtonTypeSystem];diagnostic.frame=CGRectMake(24,418,382,30);[diagnostic setTitle:@"Diagnóstico / copiar" forState:UIControlStateNormal];diagnostic.tintColor=[UIColor lightGrayColor];
+    [diagnostic addTarget:self action:@selector(showDiagnostic) forControlEvents:UIControlEventTouchUpInside];[self.card addSubview:diagnostic];
+    self.status=[[UILabel alloc] initWithFrame:CGRectMake(24,460,382,70)];self.status.text=@"Procurando o PC pelo Wi-Fi…\nJá emparelhado? Conecte o cabo ou aguarde.\nTouch ou gamepad são escolhidos no PC.";self.status.numberOfLines=4;self.status.textColor=[UIColor lightGrayColor];self.status.font=[UIFont systemFontOfSize:14];[self.card addSubview:self.status];
+    self.wakeStatus=[[UILabel alloc] initWithFrame:CGRectMake(24,536,382,42)];self.wakeStatus.numberOfLines=2;self.wakeStatus.font=[UIFont systemFontOfSize:12];self.wakeStatus.textColor=[UIColor lightGrayColor];[self.card addSubview:self.wakeStatus];[self updateWakeUI];
     self.disconnectButton=[UIButton buttonWithType:UIButtonTypeSystem];[self.disconnectButton setTitle:@"Desconectar" forState:UIControlStateNormal];[self.disconnectButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];self.disconnectButton.backgroundColor=[UIColor colorWithWhite:0 alpha:0.65];self.disconnectButton.layer.cornerRadius=10;self.disconnectButton.hidden=YES;
     [self.disconnectButton addTarget:self action:@selector(disconnect) forControlEvents:UIControlEventTouchUpInside];[self.view addSubview:self.disconnectButton];
     self.discovery=[HostDiscovery new];
@@ -98,6 +116,7 @@
     self.discovery.failed=^(NSString *reason){if(!weakSelf.connected)weakSelf.status.text=reason;};
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(background) name:UIApplicationWillResignActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(foreground) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [self updateDisplayInfo:self.view.bounds.size];[self foreground];
 }
 - (UITextField *)fieldWithPlaceholder:(NSString *)placeholder y:(CGFloat)y {
@@ -108,7 +127,7 @@
     [super viewDidLayoutSubviews];CGRect bounds=self.view.bounds;
     [CATransaction begin];[CATransaction setDisableActions:YES];self.video.frame=bounds;[CATransaction commit];
     self.touchSurface.frame=bounds;self.pad.frame=bounds;[self.pad setNeedsDisplay];
-    self.card.frame=CGRectMake((bounds.size.width-430)/2,(bounds.size.height-480)/2,430,480);
+    self.card.frame=CGRectMake((bounds.size.width-430)/2,(bounds.size.height-598)/2,430,598);
     self.disconnectButton.frame=CGRectMake(bounds.size.width/2-65,15,130,36);
     if(!self.rotating)[self updateDisplayInfo:bounds.size];
 }
@@ -155,6 +174,8 @@
     return NO;
 }
 - (void)tryAutomatic {
+    [self.wakeBridge updateActive:self.active connected:self.connected];
+    [self.wakeBridge processRequest];
     if(!self.active||!self.autoEnabled||self.connected)return;
     NSDictionary *saved=[self pairings];
     NSString *last=[[NSUserDefaults standardUserDefaults] stringForKey:@"lastHostId"];
@@ -226,7 +247,11 @@
         }else if(weakSelf.connection==weakConnection) {
             if(kind==1)[weakAttempt.decoder decode:body];
             else if(kind==2){AudioPlayer *audio=weakSelf.audio;if(audio)[audio append:body];}
-            else if(kind==4){NSString *reason=[[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];dispatch_async(dispatch_get_main_queue(),^{[weakSelf attemptEnded:weakAttempt reason:reason?:@"O PC encerrou a transmissão."];});}
+            else if(kind==4||kind==16)dispatch_async(dispatch_get_main_queue(),^{
+                if(weakSelf.connection!=weakConnection)return;
+                if([weakSelf handleNotice:body]||kind==16)return;
+                NSString *reason=[[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];[weakSelf attemptEnded:weakAttempt reason:reason?:@"O PC encerrou a transmissão."];
+            });
         }
     };
     attempt.connection.ended=^(NSString *reason){dispatch_async(dispatch_get_main_queue(),^{[weakSelf attemptEnded:weakAttempt reason:reason];});};
@@ -271,7 +296,9 @@
         saved[identity]=pair;NSUserDefaults *defaults=[NSUserDefaults standardUserDefaults];[defaults setObject:saved forKey:@"pairings"];[defaults setObject:identity forKey:@"lastHostId"];
         if(attempt.host.length)[defaults setObject:attempt.host forKey:@"host"];
         self.selectedHostId=identity;
+        [self.wakeBridge registerHost:identity key:info[@"wakeKey"]];
     }
+    [self.wakeBridge updateActive:self.active connected:YES];
     self.manualPIN=nil;self.pinField.text=@"";[self keepAlive];
 }
 - (void)attemptEnded:(StreamAttempt *)attempt reason:(NSString *)reason {
@@ -310,6 +337,29 @@
         else [self.connection sendKind:13 body:nil];
     }else [self.connection sendPad:[self.pad state]];
 }
+- (BOOL)handleNotice:(NSData *)body {
+    id value=[NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+    if(![value isKindOfClass:[NSDictionary class]])return NO;
+    NSDictionary *notice=value;
+    if(![notice[@"scope"] isEqual:@"input"]||![notice[@"recoverable"] isEqual:@YES])return NO;
+    self.suppressInput=YES;[self.touchSurface reset];[self.pad neutral];self.suppressInput=NO;
+    NSString *message=[notice[@"message"] isKindOfClass:[NSString class]]?notice[@"message"]:@"O Windows recusou um toque. Tente novamente.";
+    if(message.length>240)message=[message substringToIndex:240];
+    if(![self.lastInputNotice isEqual:message]){self.lastInputNotice=message;NSLog(@"ShockStream input: %@",message);self.status.text=message;}
+    return YES;
+}
+- (void)updateWakeUI {
+    self.wakeButton.hidden=!self.wakeBridge.installed;
+    [self.wakeButton setTitle:self.wakeBridge.enabled?@"Desativar abertura USB automática":@"Ativar abertura USB automática" forState:UIControlStateNormal];
+    self.wakeStatus.text=self.wakeBridge.lastError?: (self.wakeBridge.installed?(self.wakeBridge.enabled?@"Abertura USB ativada. Ao sair pelo Home ela será pausada.":@"O primeiro pareamento com o PC ativa a abertura USB."):@"Para abrir o app pelo cabo, instale a versão .deb.");
+}
+- (void)toggleWake { [self.wakeBridge setEnabled:!self.wakeBridge.enabled];[self updateWakeUI]; }
+- (void)showDiagnostic {
+    NSString *summary=[NSString stringWithFormat:@"%@\nÚltimo aviso de toque: %@",[self.wakeBridge diagnostic],self.lastInputNotice?:@"nenhum"];
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Diagnóstico" message:summary preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Copiar" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){(void)action;[UIPasteboard generalPasteboard].string=summary;}]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Fechar" style:UIAlertActionStyleCancel handler:nil]];[self presentViewController:alert animated:YES completion:nil];
+}
 - (void)modeChanged {
     [self stopConnections];self.autoEnabled=YES;[self.blockedPins removeAllObjects];
     self.hostField.hidden=self.mode.selectedSegmentIndex==2;
@@ -325,18 +375,27 @@
 }
 - (void)foreground {
     self.active=YES;self.autoEnabled=YES;[self.discovery start];
+    [self.wakeBridge updateActive:YES connected:self.connected];[self.wakeBridge setPaused:NO];[self.wakeBridge processRequest];
     if(!self.retry)self.retry=[NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(tryAutomatic) userInfo:nil repeats:YES];
     [self tryAutomatic];
 }
 - (void)background {
+    [self.wakeBridge setPaused:YES];[self.wakeBridge updateActive:NO connected:NO];
     self.active=NO;[self.discovery stop];[self.hosts removeAllObjects];
     [self.retry invalidate];self.retry=nil;[self stopConnections];
+}
+- (void)didEnterBackground {
+    int token=-1;uint64_t locked=0;BOOL known=NO;
+    if(notify_register_check("com.apple.springboard.lockstate",&token)==NOTIFY_STATUS_OK){known=notify_get_state(token,&locked)==NOTIFY_STATUS_OK;notify_cancel(token);}
+    // A confirmed screen lock may resume after unlock; Home/unknown state remains paused.
+    if(known&&locked&&self.wakeBridge.enabled)[self.wakeBridge setPaused:NO];
 }
 - (void)clearSession {
     [self.touchSurface reset];[self.pad neutral];self.connected=NO;self.connection=nil;self.activeAttempt=nil;self.controlMode=nil;self.awaitingGeometry=NO;
     [self.audio stop];self.audio=nil;[self.heartbeat invalidate];self.heartbeat=nil;
     [self.video flushAndRemoveImage];self.card.hidden=NO;self.pad.hidden=YES;self.touchSurface.hidden=YES;self.disconnectButton.hidden=YES;
     [UIApplication sharedApplication].idleTimerDisabled=NO;
+    [self.wakeBridge updateActive:self.active connected:NO];
 }
 - (void)stopConnections {
     [self clearSession];
@@ -345,10 +404,12 @@
 }
 - (void)disconnect {
     self.autoEnabled=NO;self.manualPIN=nil;[self stopConnections];
+    [self.wakeBridge setPaused:YES];
     self.status.text=@"Desconectado. Toque em Conectar para retomar.";
 }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (void)dealloc {
+    [self.wakeBridge stop];
     [[NSNotificationCenter defaultCenter] removeObserver:self];[self.discovery stop];
     for(StreamAttempt *attempt in self.attempts)[attempt.connection disconnect];
     [self.heartbeat invalidate];[self.retry invalidate];

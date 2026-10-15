@@ -7,7 +7,7 @@ import sys
 
 target=Path(sys.argv[1]);target.mkdir(parents=True,exist_ok=True)
 versions={}
-for name in ('av','mss','numpy','soundcard','vgamepad','cffi','pyinstaller','zeroconf','ifaddr'):
+for name in ('av','mss','numpy','soundcard','vgamepad','cffi','pyinstaller','zeroconf','ifaddr','pystray','Pillow','six'):
     dist=importlib.metadata.distribution(name);versions[name]=dist.version
     for file in dist.files or []:
         if any(word in file.name.lower() for word in ('license','copying','notice')):

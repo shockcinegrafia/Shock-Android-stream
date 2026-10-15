@@ -9,6 +9,16 @@ on:
 permissions:
   contents: read
 jobs:
+  helper-tests:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native helper framing and authentication without system changes
+        run: |
+          mkdir -p build
+          clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation -framework Security pc-ipad/wake/main.m -o build/wake-self-test
+          build/wake-self-test --self-test
   windows:
     runs-on: windows-2022
     timeout-minutes: 20
@@ -69,6 +79,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bash curl git make perl unzip zip xz-utils file fakeroot dpkg libtinfo6 ca-certificates bzip2
+      - name: Verify package scripts and archive validation
+        run: python3 -m unittest discover -s pc-ipad/tests -p 'test_deb_package.py' -v
       - name: Install proven iOS 9 ARMv7 toolchain
         run: |
           set -euo pipefail
@@ -93,6 +105,7 @@ jobs:
           with open(path,'wb') as f:plistlib.dump(p,f)
           PY
           (cd pc-ipad/ios && make FINALPACKAGE=1 && make stage FINALPACKAGE=1) 2>&1 | tee dist/ipad-build.log
+          (cd pc-ipad/wake && make FINALPACKAGE=1 && make stage FINALPACKAGE=1) 2>&1 | tee dist/wake-build.log
       - name: Package and inspect IPA
         run: |
           set -euo pipefail
@@ -104,11 +117,15 @@ jobs:
           cp -a "$APP" dist/Payload/
           (cd dist && zip -qry ShockStream-iOS9-ARMv7.ipa Payload)
           python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
+          HELPER="$(find pc-ipad/wake/.theos/_ -type f -name shockstream-waked -print -quit)"
+          test -n "$HELPER"
+          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.4.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
       - uses: actions/upload-artifact@v4
         with:
           name: ShockStream-iOS9-ARMv7
           path: |
             dist/*.ipa
+            dist/*.deb
             dist/*.json
             dist/*.txt
             dist/*.sha256

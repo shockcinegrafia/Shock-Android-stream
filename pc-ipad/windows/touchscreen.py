@@ -7,6 +7,12 @@ import time
 
 DWORD=C.c_uint32;LONG=C.c_int32
 DOWN=0x10000;UPDATE=0x20000;UP=0x40000;CANCELED=0x8000;CONTACT=4;INRANGE=2
+ERROR_NOT_READY=21
+
+class TouchInjectionError(RuntimeError):
+    def __init__(self,code):
+        self.code=code
+        super().__init__('O Windows recusou o toque (código '+str(code)+'). O vídeo continua ativo. Verifique as permissões da janela de destino.')
 
 class POINT(C.Structure):_fields_=[('x',LONG),('y',LONG)]
 class RECT(C.Structure):_fields_=[('left',LONG),('top',LONG),('right',LONG),('bottom',LONG)]
@@ -36,10 +42,11 @@ class TouchScreen:
     def __init__(self,api=None):
         self.api=api or C.WinDLL('user32',use_last_error=True)
         if api is None:
-            self.api.InitializeTouchInjection.argtypes=[DWORD,DWORD];self.api.InitializeTouchInjection.restype=C.c_bool
-            self.api.InjectTouchInput.argtypes=[DWORD,C.POINTER(POINTER_TOUCH_INFO)];self.api.InjectTouchInput.restype=C.c_bool
+            self.api.InitializeTouchInjection.argtypes=[DWORD,DWORD];self.api.InitializeTouchInjection.restype=C.c_int32
+            self.api.InjectTouchInput.argtypes=[DWORD,C.POINTER(POINTER_TOUCH_INFO)];self.api.InjectTouchInput.restype=C.c_int32
         if not self.api.InitializeTouchInjection(10,1):raise RuntimeError('O Windows não permitiu inicializar a tela touch')
         self.contacts={};self.rect={'left':0,'top':0,'width':1,'height':1};self.lock=threading.RLock();self.last=time.monotonic()
+        self.last_injection=0
 
     def set_monitor(self,rect):
         with self.lock:
@@ -54,13 +61,24 @@ class TouchScreen:
         for ident,(x,y) in sorted(self.contacts.items()):
             info=POINTER_TOUCH_INFO();info.pointerInfo.pointerType=2;info.pointerInfo.pointerId=ident+1
             info.pointerInfo.pointerFlags=special_flags if ident==special_id else UPDATE|CONTACT|INRANGE
-            info.pointerInfo.ptPixelLocation=POINT(x,y);info.pointerInfo.ptPixelLocationRaw=POINT(x,y)
+            # Raw coordinates are supplied by Windows, not by the injector.
+            # Setting them caused ERROR_INVALID_PARAMETER on a real Windows 11 target.
+            info.pointerInfo.ptPixelLocation=POINT(x,y)
             info.touchMask=1|4;info.rcContact=RECT(x-2,y-2,x+2,y+2);info.pressure=512
             values.append(info)
         if values:
             frame=(POINTER_TOUCH_INFO*len(values))(*values)
-            if not self.api.InjectTouchInput(len(values),frame):
-                raise RuntimeError('O Windows recusou o toque. Confira o aplicativo de destino e suas permissões.')
+            # Windows may reject frames less than 0.1 ms apart. Retry this exact frame.
+            for attempt in range(5):
+                delay=0.001-(time.monotonic()-self.last_injection)
+                if delay>0:time.sleep(delay)
+                C.set_last_error(0)
+                success=self.api.InjectTouchInput(len(values),frame)
+                self.last_injection=time.monotonic()
+                if success:return
+                code=C.get_last_error()
+                if code!=ERROR_NOT_READY or attempt==4:
+                    raise TouchInjectionError(code)
 
     def events(self,events):
         events=validate_events(events)
@@ -78,8 +96,9 @@ class TouchScreen:
                 elif ident in self.contacts:
                     if action in ('up','cancel'):
                         # Windows requires terminal coordinates to match the preceding update.
-                        if self.contacts[ident]!=position:
-                            self.contacts[ident]=position;self.inject()
+                        self.contacts[ident]=position
+                        # Even a stationary short tap needs an UPDATE before its UP.
+                        self.inject()
                         self.inject(ident,UP|(CANCELED if action=='cancel' else 0));del self.contacts[ident]
             if moved:self.inject()
             self.last=time.monotonic()
@@ -87,6 +106,7 @@ class TouchScreen:
     def neutral(self):
         with self.lock:
             try:
+                if self.contacts:self.inject()
                 for ident in list(self.contacts):
                     self.inject(ident,UP|CANCELED);del self.contacts[ident]
             except (RuntimeError,OSError):logging.exception('Touch cancellation refused by Windows')

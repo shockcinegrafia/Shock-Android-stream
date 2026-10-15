@@ -15,7 +15,7 @@ import usbmux
 from protocol import read_exact
 from protocol import read_packet,packet,INFO,VIDEO,TOUCH,ACK,BYE
 from host import Session
-from touchscreen import TouchScreen,POINTER_TOUCH_INFO,POINTER_INFO,DOWN,UP,UPDATE,CANCELED,validate_events
+from touchscreen import TouchScreen,POINTER_TOUCH_INFO,POINTER_INFO,DOWN,UP,UPDATE,CANCELED,validate_events,TouchInjectionError
 
 class FakeTouchAPI:
     def __init__(self):self.frames=[]
@@ -39,6 +39,34 @@ class TouchTests(unittest.TestCase):
     def test_monitor_offset_and_edges(self):
         self.assertEqual(self.touch.position(0,0),(-1024,200))
         self.assertEqual(self.touch.position(1,1),(-1,967))
+
+    def test_short_stationary_tap_includes_update_and_zero_raw_coordinates(self):
+        original=self.api.InjectTouchInput
+        def validate(count,frame):
+            for contact in frame:
+                self.assertEqual((contact.pointerInfo.ptPixelLocationRaw.x,contact.pointerInfo.ptPixelLocationRaw.y),(0,0))
+            return original(count,frame)
+        self.api.InjectTouchInput=validate
+        self.touch.events([self.event(0,'down'),self.event(0,'up')])
+        self.assertEqual(len(self.api.frames),3)
+        self.assertTrue(self.api.frames[1][0][1]&UPDATE)
+        self.assertTrue(self.api.frames[2][0][1]&UP)
+
+    def test_not_ready_retries_the_same_frame(self):
+        original=self.api.InjectTouchInput;attempts=[]
+        def flaky(count,frame):
+            attempts.append(bytes(frame))
+            if len(attempts)==1:C.set_last_error(21);return False
+            return original(count,frame)
+        self.api.InjectTouchInput=flaky
+        self.touch.events([self.event(0,'down')])
+        self.assertEqual(attempts[0],attempts[1]);self.assertEqual(len(self.api.frames),1)
+
+    def test_native_error_code_is_preserved(self):
+        def denied(count,frame):C.set_last_error(87);return False
+        self.api.InjectTouchInput=denied
+        with self.assertRaises(TouchInjectionError) as failure:self.touch.events([self.event(0,'down')])
+        self.assertEqual(failure.exception.code,87)
 
     def test_two_fingers_keep_other_contact_on_release(self):
         self.touch.events([self.event(0,'down'),self.event(1,'down')])
@@ -105,6 +133,40 @@ class USBTests(unittest.TestCase):
         thread.join()
 
 class TouchSessionTests(unittest.TestCase):
+    def test_input_rejection_reports_notice_and_video_remains_connected(self):
+        from protocol import NOTICE
+        import numpy as np
+        api=FakeTouchAPI();original=api.InjectTouchInput;attempts=[]
+        def once(count,frame):
+            attempts.append(1)
+            if len(attempts)==1:C.set_last_error(87);return False
+            return original(count,frame)
+        api.InjectTouchInput=once;touch=TouchScreen(api)
+        touch.set_monitor(dict(left=0,top=0,width=128,height=72))
+        left,right=socket.socketpair();left.settimeout(3);right.settimeout(3)
+        session=Session(left,touch,30,1024,False,lambda _:None,'touch')
+        def capture():
+            session.width,session.height=128,72
+            while not session.stop.is_set():
+                session.latest.put(np.zeros((72,128,4),dtype=np.uint8));session.stop.wait(.01)
+        session.capture=capture;errors=[]
+        def run():
+            try:session.run()
+            except Exception as error:errors.append(error)
+        worker=threading.Thread(target=run);worker.start()
+        try:
+            self.assertEqual(read_packet(right)[0],INFO);self.assertEqual(read_packet(right)[0],VIDEO)
+            right.sendall(packet(TOUCH,b'[{"id":0,"a":"down","x":0.5,"y":0.5}]'));right.sendall(packet(ACK))
+            notices=[]
+            while True:
+                kind,body=read_packet(right)
+                if kind==VIDEO:break
+                self.assertEqual(kind,NOTICE);notices.append(json.loads(body))
+            self.assertEqual(notices[0]['code'],87);self.assertTrue(notices[0]['recoverable'])
+            self.assertTrue(worker.is_alive());right.sendall(packet(BYE));worker.join(4)
+            self.assertFalse(worker.is_alive());self.assertFalse(errors);self.assertFalse(touch.contacts)
+        finally:session.close();right.close();worker.join(4)
+
     def test_touch_session_routes_input_without_gamepad(self):
         import numpy as np
         api=FakeTouchAPI();touch=TouchScreen(api)
