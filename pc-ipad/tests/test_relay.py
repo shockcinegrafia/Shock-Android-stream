@@ -128,7 +128,11 @@ class RelayTests(unittest.TestCase):
         self.assertNotEqual(old['route'],new['route']);self.assertNotEqual(old['ticket'],new['ticket'])
         host=self.host()
         def session(connection,*args,**kwargs):
-            result=Mock();result.run.side_effect=lambda:connection.sendall(packet(INFO,b'authenticated'));return result
+            result=Mock()
+            def run():
+                connection.sendall(packet(INFO,b'authenticated'))
+                self.assertEqual(read_packet(connection),(BYE,b''))
+            result.run.side_effect=run;return result
         with patch('host.Session',side_effect=session):
             host.enable_relay(self.pc,self.setup)
             for _ in range(2):
@@ -136,7 +140,7 @@ class RelayTests(unittest.TestCase):
                 client=self.connect_inner();challenge=read_exact(client,38)
                 client.sendall(proof(self.pc.key,challenge[6:]));self.assertEqual(read_exact(client,1),b'\x01')
                 client.sendall(packet(CLIENT_INFO,b'{"width":1024,"height":768}'))
-                self.assertEqual(read_packet(client),(INFO,b'authenticated'));client.close()
+                self.assertEqual(read_packet(client),(INFO,b'authenticated'));client.sendall(packet(BYE));client.close()
             self.assertIsNone(host.listener);self.assertIsNone(host.remote_listener)
 
 

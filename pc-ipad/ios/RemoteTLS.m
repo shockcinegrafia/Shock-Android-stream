@@ -8,16 +8,74 @@
 #include <errno.h>
 #include <time.h>
 
+@class TLSBridge;
 @interface RemoteTLS () {
     SSLContextRef _context;
     int _socket;
     NSLock *_lock;
-    RemoteTLS *_upstream;
+    TLSBridge *_bridge;
     size_t _writePending;
 }
 - (OSStatus)transportRead:(void *)data length:(size_t *)length;
 - (OSStatus)transportWrite:(const void *)data length:(size_t *)length;
 - (OSStatus)step:(void *)data length:(size_t)length processed:(size_t *)processed writing:(BOOL)writing;
+- (ssize_t)receiveAvailable:(void *)data length:(size_t)length;
+- (void)cancelSocket;
+@end
+
+@interface TLSBridge : NSObject
+@property(nonatomic) int localFD;
+@property(nonatomic) int bridgeFD;
+@property(atomic) BOOL closed;
+@property(nonatomic,strong) RemoteTLS *upstream;
+- (instancetype)initWithUpstream:(RemoteTLS *)upstream;
+- (void)close;
+@end
+
+@implementation TLSBridge
+- (instancetype)initWithUpstream:(RemoteTLS *)upstream {
+    if((self=[super init])) {
+        _localFD=-1;_bridgeFD=-1;_upstream=upstream;int pair[2];
+        if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)<0)return nil;
+        _localFD=pair[0];_bridgeFD=pair[1];
+        int yes=1;struct timeval timeout={5,0};
+        setsockopt(_bridgeFD,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
+        setsockopt(_bridgeFD,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+        setsockopt(_bridgeFD,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),^{
+            uint8_t buffer[16384];
+            while(!self.closed) {
+                ssize_t count=[self.upstream receiveAvailable:buffer length:sizeof(buffer)];if(count<=0)break;
+                size_t offset=0;
+                while(offset<(size_t)count&&!self.closed) {
+                    ssize_t sent=send(self.bridgeFD,buffer+offset,(size_t)count-offset,0);
+                    if(sent<0&&errno==EINTR)continue;
+                    if(sent<=0){[self close];break;}offset+=(size_t)sent;
+                }
+            }
+            [self close];
+        });
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,0),^{
+            uint8_t buffer[16384];
+            while(!self.closed) {
+                ssize_t count=recv(self.bridgeFD,buffer,sizeof(buffer),0);
+                if(count<0&&(errno==EINTR||errno==EAGAIN||errno==EWOULDBLOCK))continue;
+                if(count<=0||![self.upstream writeBytes:buffer length:(size_t)count])break;
+            }
+            [self close];
+        });
+    }
+    return self;
+}
+- (void)close {
+    @synchronized(self) {
+        if(self.closed)return;self.closed=YES;
+        if(self.localFD>=0)shutdown(self.localFD,SHUT_RDWR);
+        if(self.bridgeFD>=0)shutdown(self.bridgeFD,SHUT_RDWR);
+        [self.upstream cancelSocket];
+    }
+}
+- (void)dealloc {if(_localFD>=0)close(_localFD);if(_bridgeFD>=0)close(_bridgeFD);}
 @end
 
 static OSStatus tlsRead(SSLConnectionRef connection,void *data,size_t *length) {
@@ -54,10 +112,11 @@ static double monotonicSeconds(void) {
 }
 - (instancetype)initWithSocket:(int)fd upstream:(RemoteTLS *)upstream {
     if((self=[super init])) {
-        _socket=fd;_lock=[NSLock new];_upstream=upstream;
+        _socket=fd;_lock=[NSLock new];
+        if(upstream){_bridge=[[TLSBridge alloc] initWithUpstream:upstream];if(!_bridge)return nil;_socket=_bridge.localFD;}
         _context=SSLCreateContext(kCFAllocatorDefault,kSSLClientSide,kSSLStreamType);
-        int flags=fcntl(fd,F_GETFL,0);
-        if(!_context||flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0||
+        int flags=fcntl(_socket,F_GETFL,0);
+        if(!_context||flags<0||fcntl(_socket,F_SETFL,flags|O_NONBLOCK)<0||
            SSLSetIOFuncs(_context,tlsRead,tlsWrite)!=noErr||
            SSLSetConnection(_context,(__bridge SSLConnectionRef)self)!=noErr||
            SSLSetProtocolVersionMin(_context,kTLSProtocol12)!=noErr||
@@ -80,20 +139,22 @@ static double monotonicSeconds(void) {
     [_lock unlock];return status;
 }
 - (OSStatus)transportRead:(void *)data length:(size_t *)length {
-    if(!_upstream)return rawRead(_socket,data,length);
-    size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:data length:requested processed:&processed writing:NO];
-    if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream read: status %d, requested %lu, processed %lu, buffer %d",(int)status,(unsigned long)requested,(unsigned long)processed,data!=NULL);
-    *length=processed;
-    // SSLRead may return success after just one outer record. The transport callback
-    // must report WouldBlock whenever it did not fill the entire requested inner record.
-    return status==noErr&&processed<requested?errSSLWouldBlock:status;
+    return rawRead(_socket,data,length);
 }
 - (OSStatus)transportWrite:(const void *)data length:(size_t *)length {
-    if(!_upstream)return rawWrite(_socket,data,length);
-    size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:(void *)data length:requested processed:&processed writing:YES];
-    if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream write: status %d, requested %lu, processed %lu",(int)status,(unsigned long)requested,(unsigned long)processed);
-    *length=processed;return status==noErr&&processed<requested?errSSLWouldBlock:status;
+    return rawWrite(_socket,data,length);
 }
+- (ssize_t)receiveAvailable:(void *)data length:(size_t)length {
+    double deadline=monotonicSeconds()+5;
+    while(monotonicSeconds()<deadline) {
+        size_t processed=0;OSStatus status=[self step:data length:length processed:&processed writing:NO];
+        if(processed)return (ssize_t)processed;
+        if(status!=noErr&&status!=errSSLWouldBlock)return -1;
+        usleep(1000);
+    }
+    return -1;
+}
+- (void)cancelSocket {if(_socket>=0)shutdown(_socket,SHUT_RDWR);}
 - (BOOL)handshakeWithFingerprint:(NSString *)fingerprint {
     BOOL verified=NO;double deadline=monotonicSeconds()+8;
     while(monotonicSeconds()<deadline) {
@@ -134,7 +195,7 @@ static double monotonicSeconds(void) {
 }
 - (BOOL)readBytes:(void *)buffer length:(size_t)length {return [self transfer:buffer length:length writing:NO];}
 - (BOOL)writeBytes:(const void *)buffer length:(size_t)length {return [self transfer:(void *)buffer length:length writing:YES];}
-- (void)dealloc {if(_context)CFRelease(_context);}
+- (void)dealloc {[_bridge close];if(_context)CFRelease(_context);}
 @end
 
 static BOOL hex64(NSString *value) {
