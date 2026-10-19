@@ -42,6 +42,7 @@ int main(int argc,const char **argv) {
             for(NSUInteger i=0;i<received.length;i++)if(bytes[i]!=(uint8_t)(i%251))return 7;
             dispatch_group_wait(group,DISPATCH_TIME_FOREVER);if(!wrote)return 8;
             uint8_t complete=0xa5;if(![tls writeBytes:&complete length:1])return 10;
+            uint8_t confirmed=0;if(![tls readBytes:&confirmed length:1]||confirmed!=0x5a)return 11;
         }
         shutdown(fd,SHUT_RDWR);close(fd);
         puts(expected?(argc==7?"PASS: native end-to-end TLS through relay, concurrent video/control":"PASS: pinned native TLS and concurrent video/control"):"PASS: wrong native TLS certificate rejected");

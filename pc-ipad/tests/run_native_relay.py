@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory() as directory:
     try:
         for mode in ('valid','wrong-relay','wrong-pc'):
             revoke_pairing(pc)
+            completed=threading.Event();errors=[]
             class NativeHost:
                 stop_event=threading.Event();video_params=(20,1024,'economy');remote_audio=False;relay_socket=None
                 def report(self,text):pass
@@ -28,6 +29,10 @@ with tempfile.TemporaryDirectory() as directory:
                         for i in range(200):assert read_exact(connection,4)==i.to_bytes(4,'big')
                         sender.join(15);assert not sender.is_alive()
                         assert read_exact(connection,1)==b'\xa5' # Keep the tunnel alive until the receiver consumed the last video byte.
+                        connection.sendall(b'\x5a');completed.set()
+                        try:connection.recv(1) # Keep the bridge open until the client has consumed the confirmation.
+                        except OSError:pass
+                    except Exception as exc:errors.append(exc)
                     finally:connection.close()
             host=NativeHost();stop=threading.Event()
             setup=f'shockrelay://127.0.0.1:{server.port}?cert={relay_identity.fingerprint}&owner={owner}'
@@ -38,6 +43,7 @@ with tempfile.TemporaryDirectory() as directory:
                 result=subprocess.run([sys.argv[1],str(server.port),relay_identity.fingerprint if mode!='wrong-relay' else '0'*64,
                     str(int(mode=='valid')),pc.fingerprint if mode!='wrong-pc' else '0'*64,pair['route'],pair['ticket']],timeout=30)
                 assert result.returncode==0,(mode,result.returncode)
+                if mode=='valid':assert completed.wait(5) and not errors,errors
             finally:
                 stop.set();host.stop_event.set()
                 if host.relay_socket:
