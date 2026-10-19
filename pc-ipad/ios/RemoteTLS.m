@@ -39,6 +39,7 @@
         if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)<0)return nil;
         _localFD=pair[0];_bridgeFD=pair[1];
         int yes=1;struct timeval timeout={5,0};
+        setsockopt(_localFD,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
         setsockopt(_bridgeFD,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof(yes));
         setsockopt(_bridgeFD,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
         setsockopt(_bridgeFD,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));

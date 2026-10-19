@@ -45,6 +45,12 @@ int main(int argc,const char **argv) {
             uint8_t confirmed=0;if(![tls readBytes:&confirmed length:1]||confirmed!=0x5a)return 11;
         }
         shutdown(fd,SHUT_RDWR);close(fd);
+        if(argc==7&&accepted) {
+            // A link drop while sending controls must return an IO failure, never SIGPIPE/crash.
+            uint8_t byte=0;BOOL refused=NO;
+            for(int i=0;i<200;i++){if(![tls writeBytes:&byte length:1]){refused=YES;break;}usleep(1000);}
+            if(!refused)return 12;
+        }
         puts(expected?(argc==7?"PASS: native end-to-end TLS through relay, concurrent video/control":"PASS: pinned native TLS and concurrent video/control"):"PASS: wrong native TLS certificate rejected");
     }
     return 0;
