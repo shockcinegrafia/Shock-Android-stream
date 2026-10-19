@@ -7,7 +7,8 @@
 <key>CFBundleExecutable</key><string>ShockStream</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>13</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleShortVersionString</key><string>0.6.0</string>
+<key>NSCameraUsageDescription</key><string>Ler o QR de emparelhamento exibido pelo Shock Stream no PC.</string>
 <key>NSBonjourServices</key><array><string>_shockstream._tcp</string></array>
 <key>NSLocalNetworkUsageDescription</key><string>Encontrar seu PC e transmitir a tela pela rede local.</string>
 <key>MinimumOSVersion</key><string>9.0</string>

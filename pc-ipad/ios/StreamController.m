@@ -1,6 +1,7 @@
 #import "StreamController.h"
 #import "StreamConnection.h"
 #import "RemoteTLS.h"
+#import "PairingScanner.h"
 #import "HostDiscovery.h"
 #import "WakeBridge.h"
 #import "H264Decoder.h"
@@ -64,6 +65,7 @@
 @property(nonatomic) BOOL suppressInput;
 @property(nonatomic,copy) NSString *lastInputNotice;
 @property(nonatomic,copy) NSString *remoteInvitation;
+@property(nonatomic,strong) UIButton *scanButton;
 @end
 
 @implementation StreamController
@@ -93,6 +95,7 @@
     self.hostField=[self fieldWithPlaceholder:@"IP do PC · busca automática" y:189];
     self.hostField.text=[[NSUserDefaults standardUserDefaults] stringForKey:@"host"];
     self.remoteInvitation=ShockLoadRemoteInvitation();
+    self.scanButton=[UIButton buttonWithType:UIButtonTypeSystem];self.scanButton.frame=CGRectMake(24,251,382,50);[self.scanButton setTitle:@"Ler QR do PC" forState:UIControlStateNormal];self.scanButton.tintColor=[self accent];self.scanButton.hidden=YES;[self.scanButton addTarget:self action:@selector(scanPairing) forControlEvents:UIControlEventTouchUpInside];[self.card addSubview:self.scanButton];
     self.pinField=[self fieldWithPlaceholder:@"PIN do PC · só no primeiro acesso" y:251];
     self.pinField.keyboardType=UIKeyboardTypeNumberPad;self.pinField.secureTextEntry=YES;
     UIToolbar *keyboardBar=[[UIToolbar alloc] initWithFrame:CGRectMake(0,0,self.view.bounds.size.width,44)];
@@ -122,6 +125,8 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(foreground) name:UIApplicationDidBecomeActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didEnterBackground) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(orientationChanged) name:UIApplicationDidChangeStatusBarOrientationNotification object:nil];
+    NSInteger lastMode=[[NSUserDefaults standardUserDefaults] integerForKey:@"lastTransport"];
+    if(lastMode==3&&self.remoteInvitation){self.mode.selectedSegmentIndex=3;[self modeChanged];}
     [self updateDisplayInfo:self.view.bounds.size];[self foreground];
 }
 - (void)orientationChanged {
@@ -317,6 +322,7 @@
     if([attempt.transport isEqual:@"remote"]) {
         // Never overwrite the local PIN/USB pairing with an internet access key or public address.
         if(!ShockSaveRemoteInvitation(self.remoteInvitation))NSLog(@"ShockStream: convite remoto não pôde ser salvo no Keychain; cole novamente após reiniciar.");
+        [[NSUserDefaults standardUserDefaults] setInteger:3 forKey:@"lastTransport"];
     }else if([identity isKindOfClass:[NSString class]]&&identity.length&&identity.length<=128) {
         NSMutableDictionary *saved=[[self pairings] mutableCopy];NSMutableDictionary *pair=[saved[identity] mutableCopy]?:[NSMutableDictionary new];
         pair[@"pin"]=attempt.pin;pair[@"name"]=[info[@"name"] isKindOfClass:[NSString class]]?info[@"name"]:@"PC";
@@ -393,10 +399,20 @@
     [self stopConnections];self.autoEnabled=YES;[self.blockedPins removeAllObjects];
     self.hostField.hidden=self.mode.selectedSegmentIndex==2;
     BOOL remote=self.mode.selectedSegmentIndex==3;self.pinField.hidden=remote;
+    self.scanButton.hidden=!remote;
+    [[NSUserDefaults standardUserDefaults] setInteger:self.mode.selectedSegmentIndex forKey:@"lastTransport"];
     self.hostField.placeholder=remote?@"Cole o convite shockstream://…":@"IP do PC · busca automática";
     self.hostField.text=remote?self.remoteInvitation:[[NSUserDefaults standardUserDefaults] stringForKey:@"host"];
-    if(remote){self.status.text=@"No Windows, ative o acesso remoto e copie o convite.\nRequer endereço público com porta encaminhada ou túnel TCP.";[self tryAutomatic];return;}
+    if(remote){self.status.text=@"No PC, ative Internet por servidor.\nLeia o QR ou cole o convite.\nO servidor precisa estar configurado e online.";[self tryAutomatic];return;}
     self.status.text=@"Procurando o PC…\nNo primeiro acesso, informe o PIN exibido no Windows.";[self tryAutomatic];
+}
+- (void)scanPairing {
+    [self stopConnections];self.autoEnabled=NO;
+    PairingScanner *scanner=[PairingScanner new];__weak StreamController *weakSelf=self;
+    scanner.scanned=^(NSString *invitation){
+        weakSelf.remoteInvitation=invitation;weakSelf.hostField.text=invitation;[weakSelf connect];
+    };
+    [self presentViewController:scanner animated:YES completion:nil];
 }
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
     [self.touchSurface reset];[self.pad neutral];self.rotating=YES;

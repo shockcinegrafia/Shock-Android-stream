@@ -12,20 +12,30 @@
     SSLContextRef _context;
     int _socket;
     NSLock *_lock;
+    RemoteTLS *_upstream;
 }
+- (OSStatus)transportRead:(void *)data length:(size_t *)length;
+- (OSStatus)transportWrite:(const void *)data length:(size_t *)length;
+- (OSStatus)step:(void *)data length:(size_t)length processed:(size_t *)processed writing:(BOOL)writing;
 @end
 
 static OSStatus tlsRead(SSLConnectionRef connection,void *data,size_t *length) {
+    return [(__bridge RemoteTLS *)connection transportRead:data length:length];
+}
+static OSStatus tlsWrite(SSLConnectionRef connection,const void *data,size_t *length) {
+    return [(__bridge RemoteTLS *)connection transportWrite:data length:length];
+}
+static OSStatus rawRead(int fd,void *data,size_t *length) {
     size_t wanted=*length;ssize_t n;
-    do {n=recv((int)(intptr_t)connection,data,wanted,0);}while(n<0&&errno==EINTR);
+    do {n=recv(fd,data,wanted,0);}while(n<0&&errno==EINTR);
     *length=n>0?(size_t)n:0;
     if(n==0)return errSSLClosedGraceful;
     if(n<0)return errno==EAGAIN||errno==EWOULDBLOCK?errSSLWouldBlock:errSecIO;
     return (size_t)n==wanted?noErr:errSSLWouldBlock;
 }
-static OSStatus tlsWrite(SSLConnectionRef connection,const void *data,size_t *length) {
+static OSStatus rawWrite(int fd,const void *data,size_t *length) {
     size_t wanted=*length;ssize_t n;
-    do {n=send((int)(intptr_t)connection,data,wanted,0);}while(n<0&&errno==EINTR);
+    do {n=send(fd,data,wanted,0);}while(n<0&&errno==EINTR);
     *length=n>0?(size_t)n:0;
     if(n<0)return errno==EAGAIN||errno==EWOULDBLOCK?errSSLWouldBlock:errSecIO;
     return (size_t)n==wanted?noErr:errSSLWouldBlock;
@@ -37,17 +47,35 @@ static double monotonicSeconds(void) {
 
 @implementation RemoteTLS
 - (instancetype)initWithSocket:(int)fd {
+    return [self initWithSocket:fd upstream:nil];
+}
+- (instancetype)initWithSocket:(int)fd upstream:(RemoteTLS *)upstream {
     if((self=[super init])) {
-        _socket=fd;_lock=[NSLock new];
+        _socket=fd;_lock=[NSLock new];_upstream=upstream;
         _context=SSLCreateContext(kCFAllocatorDefault,kSSLClientSide,kSSLStreamType);
         int flags=fcntl(fd,F_GETFL,0);
         if(!_context||flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK)<0||
            SSLSetIOFuncs(_context,tlsRead,tlsWrite)!=noErr||
-           SSLSetConnection(_context,(SSLConnectionRef)(intptr_t)fd)!=noErr||
+           SSLSetConnection(_context,(__bridge SSLConnectionRef)self)!=noErr||
            SSLSetProtocolVersionMin(_context,kTLSProtocol12)!=noErr||
            SSLSetSessionOption(_context,kSSLSessionOptionBreakOnServerAuth,true)!=noErr)return nil;
     }
     return self;
+}
+- (OSStatus)step:(void *)data length:(size_t)length processed:(size_t *)processed writing:(BOOL)writing {
+    [_lock lock];
+    OSStatus status=writing?SSLWrite(_context,data,length,processed):SSLRead(_context,data,length,processed);
+    [_lock unlock];return status;
+}
+- (OSStatus)transportRead:(void *)data length:(size_t *)length {
+    if(!_upstream)return rawRead(_socket,data,length);
+    size_t processed=0;OSStatus status=[_upstream step:data length:*length processed:&processed writing:NO];
+    *length=processed;return status;
+}
+- (OSStatus)transportWrite:(const void *)data length:(size_t *)length {
+    if(!_upstream)return rawWrite(_socket,data,length);
+    size_t processed=0;OSStatus status=[_upstream step:(void *)data length:*length processed:&processed writing:YES];
+    *length=processed;return status;
 }
 - (BOOL)handshakeWithFingerprint:(NSString *)fingerprint {
     BOOL verified=NO;double deadline=monotonicSeconds()+8;
@@ -79,9 +107,7 @@ static double monotonicSeconds(void) {
     size_t done=0;double deadline=monotonicSeconds()+5;
     while(done<length) {
         size_t processed=0;
-        [_lock lock];
-        OSStatus status=writing?SSLWrite(_context,(uint8_t *)buffer+done,length-done,&processed):SSLRead(_context,(uint8_t *)buffer+done,length-done,&processed);
-        [_lock unlock];
+        OSStatus status=[self step:(uint8_t *)buffer+done length:length-done processed:&processed writing:writing];
         if(processed){done+=processed;deadline=monotonicSeconds()+5;}
         if(status!=noErr&&status!=errSSLWouldBlock)return NO;
         if(monotonicSeconds()>=deadline)return NO;
@@ -100,16 +126,20 @@ static BOOL hex64(NSString *value) {
 NSDictionary *ShockRemoteInvitation(NSString *value) {
     if(![value isKindOfClass:[NSString class]]||value.length>1024)return nil;
     NSURLComponents *url=[NSURLComponents componentsWithString:value];
-    if(![url.scheme isEqual:@"shockstream"]||!url.host.length||url.host.length>253||url.user||url.password||url.path.length||url.fragment)return nil;
+    BOOL relay=[url.scheme isEqual:@"shockstream-relay"];
+    if((![url.scheme isEqual:@"shockstream"]&&!relay)||!url.host.length||url.host.length>253||url.user||url.password||url.path.length||url.fragment)return nil;
     if([url.host rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location!=NSNotFound)return nil;
-    NSInteger port=url.port?url.port.integerValue:8093;if(port<1||port>65535)return nil;
+    NSInteger port=url.port?url.port.integerValue:(relay?443:8093);if(port<1||port>65535)return nil;
     NSMutableDictionary *query=[NSMutableDictionary new];
     for(NSURLQueryItem *item in url.queryItems) {
-        if(query[item.name]||!([item.name isEqual:@"key"]||[item.name isEqual:@"cert"])||!hex64(item.value))return nil;
+        if(query[item.name])return nil;
+        if(relay&&[item.name isEqual:@"route"]) {
+            if(item.value.length!=32||[item.value rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location!=NSNotFound)return nil;
+        }else if(!([item.name isEqual:@"key"]||[item.name isEqual:@"cert"]||(relay&&([item.name isEqual:@"relaycert"]||[item.name isEqual:@"ticket"])))||!hex64(item.value))return nil;
         query[item.name]=item.value;
     }
-    if(query.count!=2)return nil;
-    return @{@"host":url.host,@"port":@(port),@"key":query[@"key"],@"cert":query[@"cert"]};
+    if(query.count!=(relay?5:2))return nil;
+    query[@"host"]=url.host;query[@"port"]=@(port);return query;
 }
 
 static NSMutableDictionary *invitationQuery(void) {

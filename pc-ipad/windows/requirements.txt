@@ -1,5 +1,7 @@
 av==16.1.0
 cryptography==46.0.3
+qrcode==8.2
+colorama==0.4.6
 mss==10.1.0
 numpy==2.2.6
 soundcard==0.4.5

@@ -9,6 +9,45 @@ on:
 permissions:
   contents: read
 jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and verify non-root relay container
+        run: |
+          set -euo pipefail
+          python -m pip install cryptography==46.0.3
+          docker compose -f pc-ipad/relay/compose.yaml config --quiet
+          docker build -f pc-ipad/relay/Dockerfile -t shock-relay:test pc-ipad
+          docker volume create shock-relay-test-data
+          docker run --rm -v shock-relay-test-data:/data shock-relay:test --setup 127.0.0.1:18443
+          mkdir -p build
+          docker run --rm -v shock-relay-test-data:/data --entrypoint cat shock-relay:test /data/configurar-pc.txt > build/relay-setup.secret
+          docker run -d --name shock-relay-test --read-only --cap-drop ALL --security-opt no-new-privileges --memory 256m --pids-limit 64 --tmpfs /tmp -p 127.0.0.1:18443:8443 -v shock-relay-test-data:/data shock-relay:test
+          python pc-ipad/tests/container_relay_check.py build/relay-setup.secret
+          docker restart shock-relay-test
+          python pc-ipad/tests/container_relay_check.py build/relay-setup.secret
+      - name: Save deployable relay sources
+        run: |
+          mkdir -p dist/ShockStream-Relay/windows
+          cp -r pc-ipad/relay dist/ShockStream-Relay/
+          cp pc-ipad/windows/remote.py dist/ShockStream-Relay/windows/
+          cp pc-ipad/RELAY-0.6.0.md dist/ShockStream-Relay/LEIA-ME.md
+          tar -czf dist/ShockStream-Relay-0.6.0.tar.gz -C dist ShockStream-Relay
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-Relay
+          path: dist/ShockStream-Relay-0.6.0.tar.gz
+          if-no-files-found: error
+      - name: Clean up isolated test container
+        if: always()
+        run: |
+          docker rm -f shock-relay-test || true
+          docker volume rm shock-relay-test-data || true
   helper-tests:
     runs-on: macos-14
     timeout-minutes: 10
@@ -31,6 +70,7 @@ jobs:
           python -m pip install cryptography==46.0.3
           clang -fobjc-arc -fblocks -Wall -Wextra -Wno-deprecated-declarations -framework Foundation -framework Security pc-ipad/ios/RemoteTLS.m pc-ipad/tests/RemoteTLSTests.m -o build/tls-self-test
           python pc-ipad/tests/run_native_tls.py build/tls-self-test
+          python pc-ipad/tests/run_native_relay.py build/tls-self-test
   windows:
     runs-on: windows-2022
     timeout-minutes: 20
@@ -75,6 +115,7 @@ jobs:
           Copy-Item pc-ipad/REVIEW-0.4.2.md dist/ShockStream/
           Copy-Item pc-ipad/FEATURES-0.4.3.md dist/ShockStream/
           Copy-Item pc-ipad/REMOTE-0.5.0.md dist/ShockStream/
+          Copy-Item pc-ipad/RELAY-0.6.0.md dist/ShockStream/
           Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
           python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
           Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
@@ -134,7 +175,7 @@ jobs:
           python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
           HELPER="$(find pc-ipad/wake/.theos/_ -type f -name shockstream-waked -print -quit)"
           test -n "$HELPER"
-          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.5.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
+          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.6.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
       - uses: actions/upload-artifact@v4
         with:
           name: ShockStream-iOS9-ARMv7

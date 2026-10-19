@@ -5,7 +5,7 @@
 
 int main(int argc,const char **argv) {
     @autoreleasepool {
-        if(argc!=4)return 2;
+        if(argc!=4&&argc!=7)return 2;
         NSString *fingerprint=[NSString stringWithUTF8String:argv[2]];
         NSString *invite=[NSString stringWithFormat:@"shockstream://home.example:8093?key=%@&cert=%@",[@"a" stringByPaddingToLength:64 withString:@"a" startingAtIndex:0],fingerprint];
         if(!ShockRemoteInvitation(invite)||ShockRemoteInvitation([invite stringByAppendingString:@"&cert=bad"])||ShockRemoteInvitation([invite stringByReplacingOccurrencesOfString:@"8093" withString:@"0"]))return 3;
@@ -14,6 +14,16 @@ int main(int argc,const char **argv) {
         if(connect(fd,(struct sockaddr *)&address,sizeof(address))<0)return 4;
         RemoteTLS *tls=[[RemoteTLS alloc] initWithSocket:fd];BOOL accepted=[tls handshakeWithFingerprint:fingerprint];
         BOOL expected=atoi(argv[3])!=0;
+        if(accepted&&argc==7) {
+            NSString *pcCert=[NSString stringWithUTF8String:argv[4]],*route=[NSString stringWithUTF8String:argv[5]],*ticket=[NSString stringWithUTF8String:argv[6]];
+            NSString *nestedInvite=[NSString stringWithFormat:@"shockstream-relay://home.example:443?key=%@&cert=%@&relaycert=%@&route=%@&ticket=%@",[@"a" stringByPaddingToLength:64 withString:@"a" startingAtIndex:0],pcCert,fingerprint,route,ticket];
+            if(!ShockRemoteInvitation(nestedInvite)||ShockRemoteInvitation([nestedInvite stringByAppendingString:@"&ticket=bad"]))return 9;
+            NSData *request=[NSJSONSerialization dataWithJSONObject:@{@"v":@1,@"op":@"join",@"route":route,@"ticket":ticket} options:0 error:nil];
+            NSMutableData *line=[request mutableCopy];[line appendBytes:"\n" length:1];
+            accepted=[tls writeBytes:line.bytes length:line.length];char ready[6];
+            accepted=accepted&&[tls readBytes:ready length:6]&&memcmp(ready,"READY\n",6)==0;
+            if(accepted){RemoteTLS *inner=[[RemoteTLS alloc] initWithSocket:fd upstream:tls];accepted=inner&&[inner handshakeWithFingerprint:pcCert];if(accepted)tls=inner;}
+        }
         if(accepted!=expected){close(fd);return 5;}
         if(accepted) {
             // A reader must make progress while a separate writer transmits ACK/control traffic.
@@ -33,7 +43,7 @@ int main(int argc,const char **argv) {
             dispatch_group_wait(group,DISPATCH_TIME_FOREVER);if(!wrote)return 8;
         }
         shutdown(fd,SHUT_RDWR);close(fd);
-        puts(expected?"PASS: pinned native TLS and concurrent video/control":"PASS: wrong native TLS certificate rejected");
+        puts(expected?(argc==7?"PASS: native end-to-end TLS through relay, concurrent video/control":"PASS: pinned native TLS and concurrent video/control"):"PASS: wrong native TLS certificate rejected");
     }
     return 0;
 }

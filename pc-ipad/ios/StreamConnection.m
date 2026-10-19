@@ -118,9 +118,30 @@ static BOOL connectWithinAddress(int fd,const struct sockaddr *address,socklen_t
             NSString *reason=@"PC remoto inacessível. Confira endereço, encaminhamento TCP 8093 ou túnel e Firewall.";
             if(connected&&!self.closed) {
                 self.tls=[[RemoteTLS alloc] initWithSocket:fd];
-                if(!self.tls||![self.tls handshakeWithFingerprint:invitation[@"cert"]])
+                BOOL relay=invitation[@"relaycert"]!=nil;
+                if(!self.tls||![self.tls handshakeWithFingerprint:relay?invitation[@"relaycert"]:invitation[@"cert"]])
                     reason=@"Conexão TLS recusada. Certificado diferente, versão incompatível ou tempo esgotado. Copie um convite atual do PC.";
-                else reason=[self receiveSocket:fd pin:invitation[@"key"]];
+                else {
+                    BOOL ready=YES;
+                    if(relay) {
+                        NSData *request=[NSJSONSerialization dataWithJSONObject:@{@"v":@1,@"op":@"join",@"route":invitation[@"route"],@"ticket":invitation[@"ticket"]} options:0 error:nil];
+                        NSMutableData *line=[request mutableCopy];[line appendBytes:"\n" length:1];
+                        ready=[self.tls writeBytes:line.bytes length:line.length];
+                        NSMutableData *response=[NSMutableData new];uint8_t byte=0;
+                        while(ready&&response.length<64) {
+                            ready=[self.tls readBytes:&byte length:1];if(!ready||byte=='\n')break;
+                            [response appendBytes:&byte length:1];
+                        }
+                        NSString *status=[[NSString alloc] initWithData:response encoding:NSUTF8StringEncoding];
+                        ready=ready&&byte=='\n'&&[status isEqual:@"READY"];
+                        if(ready) {
+                            RemoteTLS *inner=[[RemoteTLS alloc] initWithSocket:fd upstream:self.tls];
+                            ready=inner&&[inner handshakeWithFingerprint:invitation[@"cert"]];
+                            if(ready)self.tls=inner;
+                        }
+                    }
+                    reason=ready?[self receiveSocket:fd pin:invitation[@"key"]]:@"PC indisponível, convite recusado ou conexão protegida interrompida. Verifique o app no PC.";
+                }
             }
             [self finishSocket:fd reason:reason];
         }

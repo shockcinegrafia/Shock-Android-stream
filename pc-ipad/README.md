@@ -1,4 +1,6 @@
-# Shock Stream 0.5.0 · monitor touch, USB, gamepad e acesso remoto
+# Shock Stream 0.6.0 · monitor touch, USB, gamepad e internet por servidor
+
+A versão 0.6.0 inclui servidor de conexão, saída automática do PC, convite/QR no iPad e TLS de ponta a ponta dentro do túnel. Não requer portas no roteador doméstico, mas **precisa instalar o serviço numa hospedagem pública**, ainda não contratada/configurada. Consulte [RELAY-0.6.0.md](RELAY-0.6.0.md). USB, Wi-Fi e remoto direto 0.5.0 continuam disponíveis.
 
 A versão 0.5.0 acrescenta **Remoto**, com TLS, certificado fixado pelo convite e chave de acesso separada do PIN local. Atualize os dois aplicativos para usar essa função. Requer IP público/porta encaminhada ou túnel TCP; não inclui um serviço intermediário hospedado. Consulte [REMOTE-0.5.0.md](REMOTE-0.5.0.md) para configuração e limitações. Wi-Fi local e USB continuam disponíveis.
 

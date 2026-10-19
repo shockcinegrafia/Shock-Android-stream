@@ -19,7 +19,7 @@ import webbrowser
 from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO, NOTICE,
                       LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id, display_orientation)
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -413,6 +413,8 @@ class Host:
         self.resume_event = threading.Event()
         self.remote_listener = None
         self.remote_identity = None
+        self.relay_stop=threading.Event();self.relay_stop.set()
+        self.relay_thread=None;self.relay_socket=None
 
     def start(self, fps=30, longest=1024, audio=True, port=8090, mode="auto", monitor=None,
               device_id=None, input_mode='touch', device_serial=None, show_cursor=True,quality='balanced'):
@@ -492,7 +494,7 @@ class Host:
         connection.settimeout(3)
         return client_size
 
-    def run_connection(self, connection, fps, longest, audio, transport, access_key=None, remote_listener=None):
+    def run_connection(self, connection, fps, longest, audio, transport, access_key=None, remote_listener=None, relay_guard=None):
         # Both transports race for one owner; rejected attempts must never reset its input.
         if not self.active_lock.acquire(blocking=False):
             connection.close()
@@ -503,6 +505,8 @@ class Host:
             if self.stop_event.is_set():
                 return
             if remote_listener is not None and self.remote_listener is not remote_listener:
+                return
+            if relay_guard is not None and (relay_guard is not self.relay_stop or relay_guard.is_set()):
                 return
             client_size = self.authenticate(connection, access_key) if access_key is not None else self.authenticate(connection)
             if self.video_params:fps,longest,self.quality=self.video_params
@@ -638,6 +642,11 @@ class Host:
                 if connection is not None:connection.close()
 
     def disable_remote(self):
+        self.relay_stop.set()
+        upstream=self.relay_socket
+        if upstream:
+            try:upstream.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
         listener=self.remote_listener;self.remote_listener=None
         if listener:listener.close()
         import ssl
@@ -646,6 +655,18 @@ class Host:
                 if isinstance(connection,ssl.SSLSocket):
                     try:connection.shutdown(socket.SHUT_RDWR)
                     except OSError:pass
+
+    def enable_relay(self,identity,setup):
+        from relay_client import parse_setup,run
+        parse_setup(setup)
+        if not self.thread or not self.thread.is_alive() or self.stop_event.is_set():
+            raise RuntimeError('Inicie a transmissão antes de ativar a internet')
+        if self.relay_thread and self.relay_thread.is_alive():
+            if self.relay_stop.is_set():raise RuntimeError('Aguarde o encerramento da conexão anterior e tente novamente')
+            return
+        self.remote_identity=identity;self.relay_stop=threading.Event()
+        self.relay_thread=threading.Thread(target=run,args=(self,identity,setup,self.relay_stop),daemon=True)
+        self.workers.append(self.relay_thread);self.relay_thread.start()
 
     def stop(self):
         self.disable_remote()
@@ -719,6 +740,14 @@ class App:
         self.button(remote_row,'Desativar',self.remote_off).pack(side='left',padx=3)
         self.button(self.body,'Revogar convites remotos',self.remote_revoke).pack(pady=2)
         self.label('Endereço público ou DNS:porta (padrão 8093). Requer encaminhamento TCP ou túnel.\nNo iPad, selecione Remoto e cole o convite. O PIN local continua separado.',10,'#a0b4c8',3)
+        self.label('Internet automática por servidor',12,'#4ce2bc',3)
+        relay_row=tk.Frame(self.body,bg='#101721');relay_row.pack(pady=3)
+        self.relay_setup=ttk.Entry(relay_row,width=35,show='•')
+        self.relay_setup.insert(0,self.settings.get('relaySetup',''));self.relay_setup.pack(side='left',padx=4)
+        self.button(relay_row,'Ativar / convite + QR',self.relay_invite).pack(side='left',padx=3)
+        self.relay_auto=tk.BooleanVar(value=self.settings.get('relayAuto',False))
+        tk.Checkbutton(self.body,text='Reconectar ao servidor ao iniciar este aplicativo',variable=self.relay_auto,command=self.save_preferences,bg='#101721',fg='white',selectcolor='#243343',activebackground='#101721').pack(pady=2)
+        self.label('Configuração inicial shockrelay:// do seu servidor. Depois, apenas abra os apps.\nSem servidor configurado, Wi-Fi e USB continuam funcionando.',10,'#a0b4c8',3)
         self.label("Tela transmitida",11,"#becbd8",2)
         screenrow=tk.Frame(self.body,bg="#101721");screenrow.pack(pady=4)
         self.screen=ttk.Combobox(screenrow,state="readonly",width=62);self.screen.pack(side='left',padx=4)
@@ -789,6 +818,7 @@ class App:
         if self.headless:return
         from settings import save_settings
         self.settings.update(transport=self.mode.current(),input=self.control.current(),autoStart=self.auto.get())
+        self.settings.update(relayAuto=self.relay_auto.get(),relaySetup=self.relay_setup.get().strip())
         self.settings.update(showCursor=self.cursor.get(),videoQuality=self.quality.current())
         if self.screen.current()>=0:self.settings['screenDevice']=self.screens[self.screen.current()]['device']
         save_settings(self.settings)
@@ -944,6 +974,7 @@ class App:
             self.screen.config(state='readonly');self.device.config(state='disabled')
             selected=self.screens[self.screen.current()]
             self.state.config(text="Pronto. O monitor virtual acompanhará 1024×768 ou 768×1024 do iPad." if selected.get('virtual') else "Espelhando tela física: a proporção original pode deixar barras. Use Criar segundo monitor para uma área 4:3 completa no iPad.")
+            if self.relay_auto.get() and self.relay_setup.get().strip():self.activate_relay(show_invite=False)
         except Exception as exc:self.host.stop();messagebox.showerror("Não foi possível iniciar",str(exc))
 
     def remote_invite(self):
@@ -962,15 +993,45 @@ class App:
         except Exception as exc:messagebox.showerror('Acesso remoto',str(exc))
 
     def remote_off(self):
+        self.relay_auto.set(False);self.save_preferences()
         self.host.disable_remote();self.state.config(text='Acesso remoto desativado. Wi-Fi local e USB continuam disponíveis.')
 
     def remote_revoke(self):
         try:
+            self.relay_auto.set(False);self.save_preferences()
             from remote import RemoteIdentity
             self.host.disable_remote()
             identity=self.host.remote_identity or RemoteIdentity();identity.revoke();self.host.remote_identity=identity
+            from relay_client import revoke_pairing
+            revoke_pairing(identity)
             self.state.config(text='Convites anteriores revogados. Use Ativar / copiar convite para conceder novo acesso.')
         except Exception as exc:messagebox.showerror('Acesso remoto',str(exc))
+
+    def relay_invite(self):
+        self.activate_relay(show_invite=True)
+
+    def activate_relay(self,show_invite=False):
+        try:
+            from remote import RemoteIdentity
+            from relay_client import invitation,parse_setup
+            setup=self.relay_setup.get().strip();parse_setup(setup)
+            identity=self.host.remote_identity or RemoteIdentity()
+            self.host.enable_relay(identity,setup)
+            self.relay_auto.set(True);self.save_preferences()
+            if show_invite:
+                value=invitation(identity,setup)
+                self.root.clipboard_clear();self.root.clipboard_append(value)
+                import qrcode
+                from PIL import ImageTk
+                image=qrcode.make(value).convert('RGB');image.thumbnail((440,440))
+                window=tk.Toplevel(self.root);window.title('Emparelhar iPad pela internet')
+                photo=ImageTk.PhotoImage(image);label=tk.Label(window,image=photo);label.image=photo;label.pack(padx=14,pady=14)
+                tk.Label(window,text='No iPad, selecione Remoto e Ler QR.\nO convite também foi copiado. Mantenha-o privado.').pack(padx=14,pady=8)
+                self.button(window,'Fechar',window.destroy).pack(pady=8)
+            self.state.config(text='Internet ativada: aguardando confirmação do servidor. No iPad, use Remoto e o convite/QR deste PC.')
+        except Exception as exc:
+            if show_invite:messagebox.showerror('Conexão por servidor',str(exc))
+            else:self.messages.put('Internet não ativada: confira a configuração do servidor.')
 
     def stop(self):
         self.host.stop();self.start_button.config(state='normal');self.pin.config(text="— — — — — —")
@@ -997,6 +1058,8 @@ def main():
     parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
     if args.self_test:
+        import qrcode
+        assert qrcode.make('Shock Stream pairing test').size[0]>100
         import tempfile
         from remote import RemoteIdentity,parse_invitation
         with tempfile.TemporaryDirectory() as directory:
