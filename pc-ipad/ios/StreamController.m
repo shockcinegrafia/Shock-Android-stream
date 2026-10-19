@@ -340,7 +340,7 @@
     if(self.activeAttempt==attempt)[self clearSession];
     [attempt.connection disconnect];[self.attempts removeObject:attempt];
     if(!self.connected&&self.active) {
-        self.status.text=badPIN?@"PIN recusado. Informe o PIN atual exibido no PC para emparelhar novamente.":[NSString stringWithFormat:@"%@\nTentando reconectar automaticamente…",reason?:@"Conexão encerrada"];
+        self.status.text=badPIN?([attempt.transport isEqual:@"remote"]?@"Convite remoto recusado ou revogado. No PC, copie um convite atual e cole novamente aqui.":@"PIN recusado. Informe o PIN atual exibido no PC para emparelhar novamente."):[NSString stringWithFormat:@"%@\nTentando reconectar automaticamente…",reason?:@"Conexão encerrada"];
     }
 }
 - (void)presentImage:(CVPixelBufferRef)image {
