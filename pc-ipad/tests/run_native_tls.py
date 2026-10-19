@@ -29,6 +29,7 @@ with tempfile.TemporaryDirectory() as directory:
                             sender=threading.Thread(target=send);sender.start()
                             for i in range(200):assert read_exact(secured,4)==i.to_bytes(4,'big')
                             sender.join(15);assert not sender.is_alive()
+                            assert read_exact(secured,1)==b'\xa5'
             except Exception as exc:
                 if correct:errors.append(exc)
         server=threading.Thread(target=serve);server.start()

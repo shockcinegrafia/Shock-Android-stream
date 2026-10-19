@@ -27,6 +27,7 @@ with tempfile.TemporaryDirectory() as directory:
                         sender=threading.Thread(target=lambda:connection.sendall(data));sender.start()
                         for i in range(200):assert read_exact(connection,4)==i.to_bytes(4,'big')
                         sender.join(15);assert not sender.is_alive()
+                        assert read_exact(connection,1)==b'\xa5' # Keep the tunnel alive until the receiver consumed the last video byte.
                     finally:connection.close()
             host=NativeHost();stop=threading.Event()
             setup=f'shockrelay://127.0.0.1:{server.port}?cert={relay_identity.fingerprint}&owner={owner}'

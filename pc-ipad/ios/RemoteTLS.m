@@ -109,7 +109,7 @@ static double monotonicSeconds(void) {
         size_t processed=0;
         OSStatus status=[self step:(uint8_t *)buffer+done length:length-done processed:&processed writing:writing];
         if(processed){done+=processed;deadline=monotonicSeconds()+5;}
-        if(status!=noErr&&status!=errSSLWouldBlock)return NO;
+        if(status!=noErr&&status!=errSSLWouldBlock){NSLog(@"ShockStream TLS transfer ended: status %d",(int)status);return NO;}
         if(monotonicSeconds()>=deadline)return NO;
         if(status==errSSLWouldBlock)usleep(1000);
     }
