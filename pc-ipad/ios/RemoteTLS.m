@@ -83,13 +83,16 @@ static double monotonicSeconds(void) {
     if(!_upstream)return rawRead(_socket,data,length);
     size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:data length:requested processed:&processed writing:NO];
     if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream read: status %d, requested %lu, processed %lu, buffer %d",(int)status,(unsigned long)requested,(unsigned long)processed,data!=NULL);
-    *length=processed;return status;
+    *length=processed;
+    // SSLRead may return success after just one outer record. The transport callback
+    // must report WouldBlock whenever it did not fill the entire requested inner record.
+    return status==noErr&&processed<requested?errSSLWouldBlock:status;
 }
 - (OSStatus)transportWrite:(const void *)data length:(size_t *)length {
     if(!_upstream)return rawWrite(_socket,data,length);
     size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:(void *)data length:requested processed:&processed writing:YES];
     if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream write: status %d, requested %lu, processed %lu",(int)status,(unsigned long)requested,(unsigned long)processed);
-    *length=processed;return status;
+    *length=processed;return status==noErr&&processed<requested?errSSLWouldBlock:status;
 }
 - (BOOL)handshakeWithFingerprint:(NSString *)fingerprint {
     BOOL verified=NO;double deadline=monotonicSeconds()+8;
