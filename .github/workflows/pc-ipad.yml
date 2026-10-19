@@ -1,0 +1,196 @@
+name: Build Shock Stream PC and iPad
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['pc-ipad/**', '.github/workflows/pc-ipad.yml']
+  push:
+    branches: [main]
+    paths: ['pc-ipad/**', '.github/workflows/pc-ipad.yml']
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and verify non-root relay container
+        run: |
+          set -euo pipefail
+          python -m pip install cryptography==46.0.3
+          docker compose -f pc-ipad/relay/compose.yaml config --quiet
+          docker build -f pc-ipad/relay/Dockerfile -t shock-relay:test pc-ipad
+          docker volume create shock-relay-test-data
+          docker run --rm -v shock-relay-test-data:/data shock-relay:test --setup 127.0.0.1:18443
+          mkdir -p build
+          docker run --rm -v shock-relay-test-data:/data --entrypoint cat shock-relay:test /data/configurar-pc.txt > build/relay-setup.secret
+          docker run -d --name shock-relay-test --read-only --cap-drop ALL --security-opt no-new-privileges --memory 256m --pids-limit 64 --tmpfs /tmp -p 127.0.0.1:18443:8443 -v shock-relay-test-data:/data shock-relay:test
+          python pc-ipad/tests/container_relay_check.py build/relay-setup.secret
+          docker restart shock-relay-test
+          python pc-ipad/tests/container_relay_check.py build/relay-setup.secret
+      - name: Save deployable relay sources
+        run: |
+          mkdir -p dist/ShockStream-Relay/windows
+          cp -r pc-ipad/relay dist/ShockStream-Relay/
+          cp pc-ipad/windows/remote.py dist/ShockStream-Relay/windows/
+          cp pc-ipad/windows/tls_channel.py dist/ShockStream-Relay/windows/
+          cp pc-ipad/RELAY-0.6.0.md dist/ShockStream-Relay/LEIA-ME.md
+          tar -czf dist/ShockStream-Relay-0.6.0.tar.gz -C dist ShockStream-Relay
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-Relay
+          path: dist/ShockStream-Relay-0.6.0.tar.gz
+          if-no-files-found: error
+      - name: Clean up isolated test container
+        if: always()
+        run: |
+          docker rm -f shock-relay-test || true
+          docker volume rm shock-relay-test-data || true
+  helper-tests:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native helper framing and authentication without system changes
+        run: |
+          mkdir -p build
+          clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation -framework Security pc-ipad/wake/main.m -o build/wake-self-test
+          build/wake-self-test --self-test
+      - name: Verify native iPad discovery parser without opening network sockets
+        run: |
+          clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation pc-ipad/ios/HostDiscovery.m pc-ipad/tests/HostDiscoveryTests.m -o build/discovery-self-test
+          build/discovery-self-test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native TLS against Python server and reject wrong certificate
+        run: |
+          python -m pip install cryptography==46.0.3
+          clang -fobjc-arc -fblocks -Wall -Wextra -Wno-deprecated-declarations -framework Foundation -framework Security pc-ipad/ios/RemoteTLS.m pc-ipad/tests/RemoteTLSTests.m -o build/tls-self-test
+          python pc-ipad/tests/run_native_tls.py build/tls-self-test
+          python pc-ipad/tests/run_native_relay.py build/tls-self-test
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      VGAMEPAD_SKIP_VIGEMBUS_INSTALL: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated build dependencies
+        run: |
+          python -m pip install -r pc-ipad/windows/requirements.txt
+          python pc-ipad/scripts/install_gamepad.py
+      - name: Test protocol, H.264 and gamepad state
+        run: python -m unittest discover -s pc-ipad/tests -v
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Bundle official driver packages and build setup helper
+        run: |
+          python pc-ipad/scripts/bundle_drivers.py
+          New-Item -ItemType Directory -Force build | Out-Null
+          cl /nologo /std:c++17 /EHsc /MT pc-ipad/windows/driver_setup.cpp /Febuild/DriverSetup.exe /Fobuild/DriverSetup.obj
+          if ($LASTEXITCODE -ne 0) { throw 'Driver helper compilation failed' }
+          $sig = Get-AuthenticodeSignature pc-ipad/drivers/ViGEmBus.exe
+          if ($sig.Status -ne 'Valid') { throw 'Invalid gamepad installer signature' }
+          $cat = Get-AuthenticodeSignature pc-ipad/drivers/vdd/mttvdd.cat
+          if ($cat.Status -ne 'Valid') { throw 'Invalid display driver catalog signature' }
+      - name: Build Windows program
+        run: python pc-ipad/scripts/build_windows.py
+      - name: Verify packaged program dependencies
+        run: |
+          python pc-ipad/windows/host.py --self-test
+          $env:PYTHONPATH=''
+          $process = Start-Process -FilePath './dist/ShockStream/ShockStream.exe' -ArgumentList '--self-test' -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw 'Packaged self-test failed' }
+      - name: Include usage and dependency notices
+        run: |
+          Copy-Item pc-ipad/README.md dist/ShockStream/LEIA-ME.md
+          Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
+          Copy-Item pc-ipad/REVIEW-0.4.2.md dist/ShockStream/
+          Copy-Item pc-ipad/FEATURES-0.4.3.md dist/ShockStream/
+          Copy-Item pc-ipad/REMOTE-0.5.0.md dist/ShockStream/
+          Copy-Item pc-ipad/RELAY-0.6.0.md dist/ShockStream/
+          Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
+          python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
+          Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-Windows-x64
+          path: dist/ShockStream-Windows-x64.zip
+          if-no-files-found: error
+  ipad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install legacy build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bash curl git make perl unzip zip xz-utils file fakeroot dpkg libtinfo6 ca-certificates bzip2
+      - name: Verify package scripts and archive validation
+        run: python3 -m unittest discover -s pc-ipad/tests -p 'test_deb_package.py' -v
+      - name: Install proven iOS 9 ARMv7 toolchain
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/toolchain" "$THEOS/sdks" dist
+          curl -fL --retry 3 https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz -o dist/toolchain.tar.xz
+          sha256sum dist/toolchain.tar.xz > dist/dependencies.sha256
+          tar -xJf dist/toolchain.tar.xz -C "$THEOS/toolchain"
+          curl -fL --retry 3 https://raw.githubusercontent.com/Sn0wCooder/theos-sdks/master/iPhoneOS9.2.sdk.tbz2 -o dist/sdk.tbz2
+          sha256sum dist/sdk.tbz2 >> dist/dependencies.sha256
+          tar -xjf dist/sdk.tbz2 -C "$THEOS/sdks"
+          git -C "$THEOS" rev-parse HEAD > dist/theos-commit.txt
+      - name: Compile native iPad client
+        run: |
+          set -euo pipefail
+          python3 pc-ipad/scripts/make_assets.py
+          python3 - <<'PY'
+          import plistlib,os
+          path='pc-ipad/ios/Resources/Info.plist'
+          with open(path,'rb') as f:p=plistlib.load(f)
+          p['CFBundleVersion']=str(int(os.environ['GITHUB_RUN_NUMBER'])+1)
+          with open(path,'wb') as f:plistlib.dump(p,f)
+          PY
+          (cd pc-ipad/ios && make FINALPACKAGE=1 && make stage FINALPACKAGE=1) 2>&1 | tee dist/ipad-build.log
+          (cd pc-ipad/wake && make FINALPACKAGE=1 && make stage FINALPACKAGE=1) 2>&1 | tee dist/wake-build.log
+      - name: Package and inspect IPA
+        run: |
+          set -euo pipefail
+          APP="$(find pc-ipad/ios/.theos/_ -type d -name ShockStream.app -print -quit)"
+          test -n "$APP"
+          cp pc-ipad/ios/Resources/Info.plist "$APP/Info.plist"
+          file "$APP/ShockStream" | tee dist/architecture.txt
+          mkdir -p dist/Payload
+          cp -a "$APP" dist/Payload/
+          (cd dist && zip -qry ShockStream-iOS9-ARMv7.ipa Payload)
+          python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
+          HELPER="$(find pc-ipad/wake/.theos/_ -type f -name shockstream-waked -print -quit)"
+          test -n "$HELPER"
+          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.6.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-iOS9-ARMv7
+          path: |
+            dist/*.ipa
+            dist/*.deb
+            dist/*.json
+            dist/*.txt
+            dist/*.sha256
+            dist/*.log
+          if-no-files-found: error
+      - name: Save failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShockStream-iPad-build-logs
+          path: dist/*.log
