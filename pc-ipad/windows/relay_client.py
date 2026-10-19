@@ -3,6 +3,7 @@ import json
 import secrets
 import socket
 import threading
+import time
 from urllib.parse import urlsplit,parse_qs
 
 from remote import endpoint,HEX64,pinned_client
@@ -56,12 +57,12 @@ def send_request(connection,value):
 
 
 def read_line(connection, stop=None):
-    result=bytearray()
+    result=bytearray();deadline=time.monotonic()+40
     while len(result)<64:
         if stop and stop.is_set():raise ConnectionError('Relay stopped')
         try:data=connection.recv(1)
         except socket.timeout:
-            if stop:continue
+            if stop and time.monotonic()<deadline:continue
             raise
         if not data:raise ConnectionError('Relay closed')
         if data==b'\n':return bytes(result)
@@ -112,7 +113,7 @@ def run(host,identity,setup,stop):
             connection.settimeout(1)
             while not stop.is_set():
                 status=read_line(connection,stop)
-                if status==b'ALIVE':continue
+                if status==b'ALIVE':connection.sendall(b'P');continue
                 if status!=b'READY':raise ConnectionError('Invalid relay readiness')
                 break
             if stop.is_set():break

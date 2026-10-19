@@ -13,6 +13,7 @@
     int _socket;
     NSLock *_lock;
     RemoteTLS *_upstream;
+    size_t _writePending;
 }
 - (OSStatus)transportRead:(void *)data length:(size_t *)length;
 - (OSStatus)transportWrite:(const void *)data length:(size_t *)length;
@@ -26,6 +27,7 @@ static OSStatus tlsWrite(SSLConnectionRef connection,const void *data,size_t *le
     return [(__bridge RemoteTLS *)connection transportWrite:data length:length];
 }
 static OSStatus rawRead(int fd,void *data,size_t *length) {
+    if(*length==0)return noErr;
     size_t wanted=*length;ssize_t n;
     do {n=recv(fd,data,wanted,0);}while(n<0&&errno==EINTR);
     *length=n>0?(size_t)n:0;
@@ -34,6 +36,7 @@ static OSStatus rawRead(int fd,void *data,size_t *length) {
     return (size_t)n==wanted?noErr:errSSLWouldBlock;
 }
 static OSStatus rawWrite(int fd,const void *data,size_t *length) {
+    if(*length==0)return noErr;
     size_t wanted=*length;ssize_t n;
     do {n=send(fd,data,wanted,0);}while(n<0&&errno==EINTR);
     *length=n>0?(size_t)n:0;
@@ -63,18 +66,29 @@ static double monotonicSeconds(void) {
     return self;
 }
 - (OSStatus)step:(void *)data length:(size_t)length processed:(size_t *)processed writing:(BOOL)writing {
+    if(!writing&&length==0){*processed=0;return noErr;}
     [_lock lock];
-    OSStatus status=writing?SSLWrite(_context,data,length,processed):SSLRead(_context,data,length,processed);
+    OSStatus status;
+    if(writing&&_writePending) {
+        size_t flushed=0;status=SSLWrite(_context,NULL,0,&flushed);*processed=0;
+        if(status==noErr){*processed=_writePending;_writePending=0;}
+    }else {
+        status=writing?SSLWrite(_context,data,length,processed):SSLRead(_context,data,length,processed);
+        // SSLWrite reports bytes cached internally; do not acknowledge them until the cache drains.
+        if(writing&&status==errSSLWouldBlock&&*processed){_writePending=*processed;*processed=0;}
+    }
     [_lock unlock];return status;
 }
 - (OSStatus)transportRead:(void *)data length:(size_t *)length {
     if(!_upstream)return rawRead(_socket,data,length);
-    size_t processed=0;OSStatus status=[_upstream step:data length:*length processed:&processed writing:NO];
+    size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:data length:requested processed:&processed writing:NO];
+    if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream read: status %d, requested %lu, processed %lu, buffer %d",(int)status,(unsigned long)requested,(unsigned long)processed,data!=NULL);
     *length=processed;return status;
 }
 - (OSStatus)transportWrite:(const void *)data length:(size_t *)length {
     if(!_upstream)return rawWrite(_socket,data,length);
-    size_t processed=0;OSStatus status=[_upstream step:(void *)data length:*length processed:&processed writing:YES];
+    size_t requested=*length;size_t processed=0;OSStatus status=[_upstream step:(void *)data length:requested processed:&processed writing:YES];
+    if(status!=noErr&&status!=errSSLWouldBlock)NSLog(@"ShockStream TLS upstream write: status %d, requested %lu, processed %lu",(int)status,(unsigned long)requested,(unsigned long)processed);
     *length=processed;return status;
 }
 - (BOOL)handshakeWithFingerprint:(NSString *)fingerprint {

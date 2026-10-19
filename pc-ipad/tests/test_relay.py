@@ -55,6 +55,20 @@ class RelayTests(unittest.TestCase):
         duplicate=self.outer();self.request(duplicate,'host',owner=self.owner);self.assertEqual(read_line(duplicate),b'BUSY')
         first.close();duplicate.close()
 
+    def test_heartbeat_is_drained_before_join_enters_inner_tls(self):
+        self.server.relay.heartbeat=.03
+        host=self.outer();self.request(host,'host',owner=self.owner);self.assertEqual(read_line(host),b'WAIT')
+        self.assertEqual(read_line(host),b'ALIVE')
+        client=self.outer();self.request(client,'join');host.sendall(b'P')
+        self.assertEqual(read_line(host),b'READY');self.assertEqual(read_line(client),b'READY')
+        sample=b'inner TLS fixture';host.sendall(sample);self.assertEqual(read_exact(client,len(sample)),sample)
+
+    def test_unresponsive_registered_host_is_expired_for_reconnection(self):
+        self.server.relay.heartbeat=.03;self.server.relay.heartbeat_timeout=.05
+        host=self.outer();self.request(host,'host',owner=self.owner);self.assertEqual(read_line(host),b'WAIT')
+        self.assertEqual(read_line(host),b'ALIVE');self.assertEqual(read_line(host),b'DENIED')
+        self.assertNotIn('a'*32,self.server.relay.routes)
+
     def test_malformed_and_oversized_requests_are_bounded(self):
         for payload in (b'[]\n',b'{}\n',b'x'*1100+b'\n'):
             connection=self.outer();connection.sendall(payload)

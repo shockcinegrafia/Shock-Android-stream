@@ -25,10 +25,11 @@ class Waiting:
 
 
 class Relay:
-    def __init__(self, owner_token, max_routes=8, max_connections=32):
+    def __init__(self, owner_token, max_routes=8, max_connections=32, heartbeat=15, heartbeat_timeout=5):
         if not isinstance(owner_token,str) or not HEX64.fullmatch(owner_token):raise ValueError('Invalid owner token')
         self.owner_token=owner_token;self.routes={};self.max_routes=max_routes
         self.max_connections=max_connections;self.active=0;self.failures={};self.transferred=0
+        self.heartbeat=heartbeat;self.heartbeat_timeout=heartbeat_timeout
 
     async def reply(self, writer, value):
         writer.write(value+b'\n');await writer.drain()
@@ -61,9 +62,14 @@ class Relay:
                     eof_task=asyncio.create_task(reader.read(1))
                     try:
                         while not join_task.done():
-                            done,_=await asyncio.wait((join_task,eof_task),timeout=15,return_when=asyncio.FIRST_COMPLETED)
+                            done,_=await asyncio.wait((join_task,eof_task),timeout=self.heartbeat,return_when=asyncio.FIRST_COMPLETED)
                             if eof_task in done:return # A waiting host sends no application data.
-                            if not done:await self.reply(writer,b'ALIVE')
+                            if not done:
+                                eof_task.cancel();await asyncio.gather(eof_task,return_exceptions=True)
+                                await self.reply(writer,b'ALIVE')
+                                # Drain the control reply before READY, so it cannot enter inner TLS.
+                                if await asyncio.wait_for(reader.readexactly(1),self.heartbeat_timeout)!=b'P':return
+                                eof_task=asyncio.create_task(reader.read(1))
                         eof_task.cancel();await asyncio.gather(eof_task,return_exceptions=True)
                         client_reader,client_writer=waiting.client
                         await self.reply(writer,b'READY');await self.reply(client_writer,b'READY')
