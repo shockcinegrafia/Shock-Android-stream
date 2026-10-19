@@ -23,6 +23,14 @@ jobs:
         run: |
           clang -fobjc-arc -fblocks -Wall -Wextra -framework Foundation -framework CoreFoundation pc-ipad/ios/HostDiscovery.m pc-ipad/tests/HostDiscoveryTests.m -o build/discovery-self-test
           build/discovery-self-test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native TLS against Python server and reject wrong certificate
+        run: |
+          python -m pip install cryptography==46.0.3
+          clang -fobjc-arc -fblocks -Wall -Wextra -Wno-deprecated-declarations -framework Foundation -framework Security pc-ipad/ios/RemoteTLS.m pc-ipad/tests/RemoteTLSTests.m -o build/tls-self-test
+          python pc-ipad/tests/run_native_tls.py build/tls-self-test
   windows:
     runs-on: windows-2022
     timeout-minutes: 20
@@ -66,6 +74,7 @@ jobs:
           Copy-Item pc-ipad/THIRD_PARTY.md dist/ShockStream/
           Copy-Item pc-ipad/REVIEW-0.4.2.md dist/ShockStream/
           Copy-Item pc-ipad/FEATURES-0.4.3.md dist/ShockStream/
+          Copy-Item pc-ipad/REMOTE-0.5.0.md dist/ShockStream/
           Copy-Item -Recurse dist/third-party-sources dist/ShockStream/
           python pc-ipad/scripts/collect_notices.py dist/ShockStream/licenses
           Compress-Archive -Path dist/ShockStream -DestinationPath dist/ShockStream-Windows-x64.zip
@@ -125,7 +134,7 @@ jobs:
           python3 pc-ipad/scripts/verify_ipa.py dist/ShockStream-iOS9-ARMv7.ipa | tee dist/ipa-verification.json
           HELPER="$(find pc-ipad/wake/.theos/_ -type f -name shockstream-waked -print -quit)"
           test -n "$HELPER"
-          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.4.2 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
+          python3 pc-ipad/scripts/package_deb.py --app "$APP" --helper "$HELPER" --version 0.5.0 --build "$((GITHUB_RUN_NUMBER+1))" --out dist/ShockStream-iOS9-ARMv7.deb | tee dist/deb-verification.json
       - uses: actions/upload-artifact@v4
         with:
           name: ShockStream-iOS9-ARMv7

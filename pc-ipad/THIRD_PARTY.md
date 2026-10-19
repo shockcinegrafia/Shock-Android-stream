@@ -1,4 +1,6 @@
-# Dependências da versão 0.4.0
+# Dependências do Shock Stream
+
+- Acesso remoto 0.5.0: Cryptography 46.0.3 (Apache-2.0 ou BSD-3-Clause), https://github.com/pyca/cryptography ; o pacote Windows inclui os avisos do wheel, inclusive OpenSSL. O iPad usa Security/Secure Transport do sistema Apple.
 
 Este projeto implementa seu próprio protocolo. Não é um cliente Moonlight nem é compatível com GameStream/Sunshine.
 

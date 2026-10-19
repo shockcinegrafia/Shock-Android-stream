@@ -1,4 +1,6 @@
-# Shock Stream Windows 0.4.3 / iPad 0.4.2 · monitor touch, USB e gamepad
+# Shock Stream 0.5.0 · monitor touch, USB, gamepad e acesso remoto
+
+A versão 0.5.0 acrescenta **Remoto**, com TLS, certificado fixado pelo convite e chave de acesso separada do PIN local. Atualize os dois aplicativos para usar essa função. Requer IP público/porta encaminhada ou túnel TCP; não inclui um serviço intermediário hospedado. Consulte [REMOTE-0.5.0.md](REMOTE-0.5.0.md) para configuração e limitações. Wi-Fi local e USB continuam disponíveis.
 
 A versão 0.4.2 inclui os clientes Windows e iPad atualizados. A descoberta por UDP 8090 complementa o Bonjour; requer o app novo no iPad e uma rede que permita broadcast. Não garante descoberta em redes isoladas ou com Firewall bloqueando tráfego. Consulte REVIEW-0.4.2.md para os achados da revisão do 0.4.1. A latência física não foi medida.
 

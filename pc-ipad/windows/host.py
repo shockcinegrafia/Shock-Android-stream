@@ -19,7 +19,7 @@ import webbrowser
 from protocol import (MAGIC, VIDEO, AUDIO, INFO, ERROR, ACK, PAD, BYE, HEARTBEAT, TOUCH, CLIENT_INFO, NOTICE,
                       LatestFrame, fit_size, packet, proof, read_exact, read_packet, validate_pad, validate_display, display_id, display_orientation)
 
-VERSION = "0.4.3"
+VERSION = "0.5.0"
 DRIVER_URL = "https://github.com/ViGEm/ViGEmBus/releases/tag/v1.22.0"
 
 
@@ -411,12 +411,15 @@ class Host:
         self.connections_lock = threading.Lock()
         self.connections = set()
         self.resume_event = threading.Event()
+        self.remote_listener = None
+        self.remote_identity = None
 
     def start(self, fps=30, longest=1024, audio=True, port=8090, mode="auto", monitor=None,
               device_id=None, input_mode='touch', device_serial=None, show_cursor=True,quality='balanced'):
         from video_options import bitrate
         bitrate(quality);self.show_cursor=show_cursor;self.quality=quality
         self.video_params=(fps,longest,quality)
+        self.remote_audio=audio
         if any(worker.is_alive() for worker in self.workers) or (self.advertiser and self.advertiser.thread.is_alive()):
             raise RuntimeError('Aguarde o encerramento da transmissão anterior')
         if mode not in ('auto', 'wifi', 'usb') or input_mode not in ('touch', 'gamepad'):
@@ -462,14 +465,14 @@ class Host:
         self.show_cursor=bool(enabled)
         if self.session:self.session.show_cursor=self.show_cursor
 
-    def authenticate(self, connection):
+    def authenticate(self, connection, access_key=None):
         import hmac
         connection.settimeout(5)
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
         nonce = secrets.token_bytes(32)
         connection.sendall(MAGIC + nonce)
-        if not hmac.compare_digest(read_exact(connection, 32), proof(self.pin, nonce)):
+        if not hmac.compare_digest(read_exact(connection, 32), proof(access_key if access_key is not None else self.pin, nonce)):
             connection.sendall(b"\x00")
             raise PermissionError('PIN incorreto; conexão recusada')
         connection.sendall(b"\x01")
@@ -478,7 +481,7 @@ class Host:
         client_size = (1024, 768)
         self.auth_client_display_id = None
         self.auth_client_orientation = None
-        if select.select([connection], [], [], 1)[0]:
+        if (hasattr(connection,'pending') and connection.pending()) or select.select([connection], [], [], 1)[0]:
             kind, body = read_packet(connection)
             if kind != CLIENT_INFO or len(body) > 512:
                 raise ValueError('Informações iniciais do iPad inválidas')
@@ -489,7 +492,7 @@ class Host:
         connection.settimeout(3)
         return client_size
 
-    def run_connection(self, connection, fps, longest, audio, transport):
+    def run_connection(self, connection, fps, longest, audio, transport, access_key=None):
         # Both transports race for one owner; rejected attempts must never reset its input.
         if not self.active_lock.acquire(blocking=False):
             connection.close()
@@ -499,7 +502,7 @@ class Host:
         try:
             if self.stop_event.is_set():
                 return
-            client_size = self.authenticate(connection)
+            client_size = self.authenticate(connection, access_key) if access_key is not None else self.authenticate(connection)
             if self.video_params:fps,longest,self.quality=self.video_params
             self.session = Session(connection, self.pad, fps, longest, audio, self.report,
                                    self.input_mode, self.monitor, self.identity['hostId'], client_size,
@@ -599,7 +602,51 @@ class Host:
                 if not self.stop_event.is_set():
                     self.report('Conexão encerrada: ' + str(exc))
 
+    def enable_remote(self, identity, port=8093):
+        if not self.thread or not self.thread.is_alive() or self.stop_event.is_set():
+            raise RuntimeError('Inicie a transmissão antes de ativar o acesso remoto')
+        if self.remote_listener:
+            return
+        listener=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            listener.bind(('0.0.0.0',port));listener.listen(2);listener.settimeout(.5)
+        except Exception:
+            listener.close();raise
+        self.remote_listener=listener;self.remote_identity=identity
+        worker=threading.Thread(target=self.serve_remote,args=(listener,identity),daemon=True)
+        self.workers.append(worker);worker.start()
+
+    def serve_remote(self, listener, identity):
+        while not self.stop_event.is_set() and self.remote_listener is listener:
+            connection=None
+            try:
+                connection,_=listener.accept();connection.settimeout(5)
+                # Complete TLS before the SHOCK1 challenge: the LAN PIN is never accepted here.
+                connection=identity.context.wrap_socket(connection,server_side=True)
+                fps,size,_=self.video_params
+                self.run_connection(connection,fps,size,self.remote_audio,'remota TLS',identity.key)
+            except socket.timeout:
+                continue
+            except Exception:
+                # Do not log invitations, keys, peer data, or unauthenticated packet content.
+                if not self.stop_event.is_set() and self.remote_listener is listener:
+                    self.report('Acesso remoto encerrado ou recusado. Confira o convite e a rede.')
+            finally:
+                if connection is not None:connection.close()
+
+    def disable_remote(self):
+        listener=self.remote_listener;self.remote_listener=None
+        if listener:listener.close()
+        import ssl
+        with self.connections_lock:
+            for connection in list(self.connections):
+                if isinstance(connection,ssl.SSLSocket):
+                    try:connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:pass
+
     def stop(self):
+        self.disable_remote()
         self.stop_event.set()
         self.resume_event.clear()
         if self.advertiser:
@@ -661,6 +708,15 @@ class App:
         self.control.current(max(0,min(1,self.settings.get('input',0))));self.control.pack(pady=3);self.control.bind('<<ComboboxSelected>>',self.mode_changed)
         self.hint=self.label("Abra o app do iPad. Ele procura o PC automaticamente. PIN apenas no primeiro uso.",11,"#a0b4c8",3)
         self.pin=self.label("— — — — — —",28,"#4ce2bc",4)
+        self.label('Acesso remoto pela internet · TLS',12,'#4ce2bc',3)
+        remote_row=tk.Frame(self.body,bg='#101721');remote_row.pack(pady=3)
+        self.remote_address=ttk.Entry(remote_row,width=35)
+        self.remote_address.insert(0,self.settings.get('remoteAddress',''))
+        self.remote_address.pack(side='left',padx=4)
+        self.button(remote_row,'Ativar / copiar convite',self.remote_invite).pack(side='left',padx=3)
+        self.button(remote_row,'Desativar',self.remote_off).pack(side='left',padx=3)
+        self.button(self.body,'Revogar convites remotos',self.remote_revoke).pack(pady=2)
+        self.label('Endereço público ou DNS:porta (padrão 8093). Requer encaminhamento TCP ou túnel.\nNo iPad, selecione Remoto e cole o convite. O PIN local continua separado.',10,'#a0b4c8',3)
         self.label("Tela transmitida",11,"#becbd8",2)
         screenrow=tk.Frame(self.body,bg="#101721");screenrow.pack(pady=4)
         self.screen=ttk.Combobox(screenrow,state="readonly",width=62);self.screen.pack(side='left',padx=4)
@@ -880,12 +936,39 @@ class App:
                 device=self.usb_devices[self.device.current()-1]
                 device_id=device['DeviceID'];device_serial=device.get('Properties',{}).get('SerialNumber')
             pin=self.host.start(int(self.fps.get().split()[0]),int(self.size.get().split()[0]),self.audio.get(),mode=('auto','wifi','usb')[self.mode.current()],monitor=self.screens[self.screen.current()],device_id=device_id,device_serial=device_serial,input_mode='touch' if self.control.current()==0 else 'gamepad',show_cursor=self.cursor.get(),quality=('balanced','text','economy')[max(0,self.quality.current())])
+            self.host.remote_audio=self.audio.get()
             self.save_preferences()
             self.pin.config(text=' '.join(pin));self.start_button.config(state='disabled')
             self.screen.config(state='readonly');self.device.config(state='disabled')
             selected=self.screens[self.screen.current()]
             self.state.config(text="Pronto. O monitor virtual acompanhará 1024×768 ou 768×1024 do iPad." if selected.get('virtual') else "Espelhando tela física: a proporção original pode deixar barras. Use Criar segundo monitor para uma área 4:3 completa no iPad.")
         except Exception as exc:self.host.stop();messagebox.showerror("Não foi possível iniciar",str(exc))
+
+    def remote_invite(self):
+        try:
+            from remote import RemoteIdentity,endpoint
+            address=self.remote_address.get().strip();endpoint(address)
+            if not self.host.thread or not self.host.thread.is_alive() or self.host.stop_event.is_set():
+                raise RuntimeError('Clique Iniciar antes de ativar o acesso remoto.')
+            identity=self.host.remote_identity or RemoteIdentity()
+            # External port may differ from the local TLS port forwarded by the router/tunnel.
+            self.host.enable_remote(identity)
+            invitation=identity.invitation(address)
+            self.root.clipboard_clear();self.root.clipboard_append(invitation)
+            self.settings['remoteAddress']=address;self.save_preferences()
+            self.state.config(text='Remoto ativado na porta TCP 8093. Convite copiado; no iPad, selecione Remoto e cole. Encaminhe somente a porta TLS 8093 ou use um túnel TCP.')
+        except Exception as exc:messagebox.showerror('Acesso remoto',str(exc))
+
+    def remote_off(self):
+        self.host.disable_remote();self.state.config(text='Acesso remoto desativado. Wi-Fi local e USB continuam disponíveis.')
+
+    def remote_revoke(self):
+        try:
+            from remote import RemoteIdentity
+            self.host.disable_remote()
+            identity=self.host.remote_identity or RemoteIdentity();identity.revoke();self.host.remote_identity=identity
+            self.state.config(text='Convites anteriores revogados. Use Ativar / copiar convite para conceder novo acesso.')
+        except Exception as exc:messagebox.showerror('Acesso remoto',str(exc))
 
     def stop(self):
         self.host.stop();self.start_button.config(state='normal');self.pin.config(text="— — — — — —")
@@ -912,6 +995,11 @@ def main():
     parser.add_argument("--background", action="store_true")
     args = parser.parse_args()
     if args.self_test:
+        import tempfile
+        from remote import RemoteIdentity,parse_invitation
+        with tempfile.TemporaryDirectory() as directory:
+            identity=RemoteIdentity(directory)
+            assert parse_invitation(identity.invitation('127.0.0.1'))[2]==identity.key
         import av
         import numpy as np
         import mss, soundcard, importlib.util, ctypes
@@ -950,7 +1038,7 @@ def main():
         app=App(headless=True);app.root.update_idletasks()
         assert len(app.mode['values'])==3 and len(app.control['values'])==2
         app.quit()
-        print("PASS: bundled libraries, H.264 baseline encoder, immediate Annex-B output")
+        print("PASS: bundled libraries, H.264 baseline encoder, immediate Annex-B output, TLS identity")
         return
     folder = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ShockStream"
     folder.mkdir(parents=True, exist_ok=True)

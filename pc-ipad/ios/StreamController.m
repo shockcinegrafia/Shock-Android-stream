@@ -1,5 +1,6 @@
 #import "StreamController.h"
 #import "StreamConnection.h"
+#import "RemoteTLS.h"
 #import "HostDiscovery.h"
 #import "WakeBridge.h"
 #import "H264Decoder.h"
@@ -20,6 +21,7 @@
 @property(nonatomic,copy) NSString *addressGroup;
 @property(nonatomic,copy) NSString *host;
 @property(nonatomic) int port;
+@property(nonatomic,strong) NSDictionary *invitation;
 @property(nonatomic) NSUInteger sentDisplayId;
 @end
 @implementation StreamAttempt
@@ -61,6 +63,7 @@
 @property(nonatomic) NSUInteger displayId;
 @property(nonatomic) BOOL suppressInput;
 @property(nonatomic,copy) NSString *lastInputNotice;
+@property(nonatomic,copy) NSString *remoteInvitation;
 @end
 
 @implementation StreamController
@@ -84,11 +87,12 @@
     self.card=[UIView new];self.card.backgroundColor=[UIColor colorWithRed:0.10 green:0.15 blue:0.20 alpha:1];self.card.layer.cornerRadius=20;[self.view addSubview:self.card];
     UILabel *title=[[UILabel alloc] initWithFrame:CGRectMake(24,22,382,42)];title.text=@"SHOCK STREAM";title.textColor=[self accent];title.font=[UIFont boldSystemFontOfSize:29];[self.card addSubview:title];
     UILabel *subtitle=[[UILabel alloc] initWithFrame:CGRectMake(24,72,382,52)];subtitle.text=@"Abra o Shock Stream no PC.\nO iPad encontra o computador automaticamente.";subtitle.numberOfLines=2;subtitle.textColor=[UIColor lightGrayColor];subtitle.font=[UIFont systemFontOfSize:15];[self.card addSubview:subtitle];
-    self.mode=[[UISegmentedControl alloc] initWithItems:@[@"Automático",@"Wi-Fi",@"USB"]];
+    self.mode=[[UISegmentedControl alloc] initWithItems:@[@"Auto",@"Wi-Fi",@"USB",@"Remoto"]];
     self.mode.frame=CGRectMake(24,137,382,38);self.mode.selectedSegmentIndex=0;self.mode.tintColor=[self accent];
     [self.mode addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];[self.card addSubview:self.mode];
     self.hostField=[self fieldWithPlaceholder:@"IP do PC · busca automática" y:189];
     self.hostField.text=[[NSUserDefaults standardUserDefaults] stringForKey:@"host"];
+    self.remoteInvitation=ShockLoadRemoteInvitation();
     self.pinField=[self fieldWithPlaceholder:@"PIN do PC · só no primeiro acesso" y:251];
     self.pinField.keyboardType=UIKeyboardTypeNumberPad;self.pinField.secureTextEntry=YES;
     UIToolbar *keyboardBar=[[UIToolbar alloc] initWithFrame:CGRectMake(0,0,self.view.bounds.size.width,44)];
@@ -166,6 +170,7 @@
 }
 - (void)foundHost:(NSDictionary *)host {
     NSString *identity=host[@"hostId"];self.hosts[identity]=host;
+    if(self.mode.selectedSegmentIndex==3)return;
     NSString *last=[[NSUserDefaults standardUserDefaults] stringForKey:@"lastHostId"];
     if(!self.selectedHostId||[identity isEqual:last]) {
         self.selectedHostId=identity;
@@ -186,6 +191,12 @@
     NSDictionary *saved=[self pairings];
     NSString *last=[[NSUserDefaults standardUserDefaults] stringForKey:@"lastHostId"];
     NSInteger mode=self.mode.selectedSegmentIndex;
+    if(mode==3) {
+        NSDictionary *invitation=ShockRemoteInvitation(self.remoteInvitation);
+        if(invitation&&![self hasAttempt:@"remote"])
+            [self beginHost:invitation transport:@"remote" pin:invitation[@"key"] expected:nil];
+        return;
+    }
     // The last authenticated PC is also a fallback if multicast is blocked by the router.
     NSString *selected=self.selectedHostId?:last;
     NSDictionary *host=selected?self.hosts[selected]:nil;
@@ -207,6 +218,12 @@
         [self beginHost:@{} transport:@"usb" pin:usbPIN expected:self.manualPIN?nil:last];
 }
 - (void)connect {
+    if(self.mode.selectedSegmentIndex==3) {
+        NSString *value=[self.hostField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if(!ShockRemoteInvitation(value)){self.status.text=@"Cole o convite completo criado no PC em Ativar / copiar convite.";return;}
+        [self.view endEditing:YES];[self stopConnections];self.remoteInvitation=value;
+        self.autoEnabled=YES;[self.blockedPins removeAllObjects];[self tryAutomatic];return;
+    }
     NSString *pin=self.pinField.text;
     if(![self validPIN:pin]){self.status.text=@"Informe o PIN de 6 dígitos exibido no PC.";return;}
     [self.view endEditing:YES];[self stopConnections];
@@ -229,6 +246,7 @@
     NSString *key=[transport isEqual:@"usb"]?@"usb":address;
     if([self.blockedPins[key] isEqual:pin])return;
     StreamAttempt *attempt=[StreamAttempt new];attempt.transport=transport;attempt.pin=pin;attempt.hostId=identity;attempt.addressGroup=addressGroup;attempt.host=address;attempt.port=[host[@"port"] intValue];
+    if([transport isEqual:@"remote"])attempt.invitation=host;
     attempt.connection=[StreamConnection new];attempt.decoder=[H264Decoder new];[self.attempts addObject:attempt];
     __weak StreamController *weakSelf=self;__weak StreamAttempt *weakAttempt=attempt;__weak StreamConnection *weakConnection=attempt.connection;
     attempt.connection.authenticated=^{
@@ -262,6 +280,7 @@
     };
     attempt.connection.ended=^(NSString *reason){dispatch_async(dispatch_get_main_queue(),^{[weakSelf attemptEnded:weakAttempt reason:reason];});};
     if([transport isEqual:@"usb"])[attempt.connection waitUSBWithPIN:pin];
+    else if([transport isEqual:@"remote"])[attempt.connection connectRemote:attempt.invitation];
     else [attempt.connection connectHost:attempt.host port:attempt.port pin:pin];
 }
 - (void)acceptInfo:(NSData *)body attempt:(StreamAttempt *)attempt {
@@ -295,7 +314,10 @@
     else {[self.audio stop];self.audio=nil;}
     if(!self.heartbeat)self.heartbeat=[NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(keepAlive) userInfo:nil repeats:YES];
     // A PIN is remembered only after the host identity and session INFO have been accepted.
-    if([identity isKindOfClass:[NSString class]]&&identity.length&&identity.length<=128) {
+    if([attempt.transport isEqual:@"remote"]) {
+        // Never overwrite the local PIN/USB pairing with an internet access key or public address.
+        if(!ShockSaveRemoteInvitation(self.remoteInvitation))NSLog(@"ShockStream: convite remoto não pôde ser salvo no Keychain; cole novamente após reiniciar.");
+    }else if([identity isKindOfClass:[NSString class]]&&identity.length&&identity.length<=128) {
         NSMutableDictionary *saved=[[self pairings] mutableCopy];NSMutableDictionary *pair=[saved[identity] mutableCopy]?:[NSMutableDictionary new];
         pair[@"pin"]=attempt.pin;pair[@"name"]=[info[@"name"] isKindOfClass:[NSString class]]?info[@"name"]:@"PC";
         if(attempt.host.length){pair[@"host"]=attempt.host;pair[@"port"]=@(attempt.port);}
@@ -370,6 +392,10 @@
 - (void)modeChanged {
     [self stopConnections];self.autoEnabled=YES;[self.blockedPins removeAllObjects];
     self.hostField.hidden=self.mode.selectedSegmentIndex==2;
+    BOOL remote=self.mode.selectedSegmentIndex==3;self.pinField.hidden=remote;
+    self.hostField.placeholder=remote?@"Cole o convite shockstream://…":@"IP do PC · busca automática";
+    self.hostField.text=remote?self.remoteInvitation:[[NSUserDefaults standardUserDefaults] stringForKey:@"host"];
+    if(remote){self.status.text=@"No Windows, ative o acesso remoto e copie o convite.\nRequer endereço público com porta encaminhada ou túnel TCP.";[self tryAutomatic];return;}
     self.status.text=@"Procurando o PC…\nNo primeiro acesso, informe o PIN exibido no Windows.";[self tryAutomatic];
 }
 - (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
