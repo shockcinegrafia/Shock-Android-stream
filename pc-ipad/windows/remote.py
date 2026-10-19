@@ -110,4 +110,5 @@ def pinned_client(sock, fingerprint):
     if not secrets.compare_digest(hashlib.sha256(secured.getpeercert(binary_form=True)).hexdigest(), fingerprint):
         secured.close()
         raise ssl.SSLCertVerificationError('O certificado não corresponde ao convite')
-    return secured
+    from tls_channel import TLSChannel
+    return TLSChannel(secured)

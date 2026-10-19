@@ -630,6 +630,8 @@ class Host:
                 connection,_=listener.accept();connection.settimeout(5)
                 # Complete TLS before the SHOCK1 challenge: the LAN PIN is never accepted here.
                 connection=identity.context.wrap_socket(connection,server_side=True)
+                from tls_channel import TLSChannel
+                connection=TLSChannel(connection)
                 fps,size,_=self.video_params
                 self.run_connection(connection,fps,size,self.remote_audio,'remota TLS',identity.key,listener)
             except socket.timeout:
@@ -652,7 +654,7 @@ class Host:
         import ssl
         with self.connections_lock:
             for connection in list(self.connections):
-                if isinstance(connection,ssl.SSLSocket):
+                if isinstance(connection,ssl.SSLSocket) or getattr(connection,'is_tls',False) is True:
                     try:connection.shutdown(socket.SHUT_RDWR)
                     except OSError:pass
 

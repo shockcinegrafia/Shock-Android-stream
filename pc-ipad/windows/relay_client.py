@@ -121,6 +121,8 @@ def run(host,identity,setup,stop):
             tunnel.local.settimeout(8)
             # The relay terminates only the outside TLS. This second TLS session terminates at the PC.
             secured=identity.context.wrap_socket(tunnel.local,server_side=True)
+            from tls_channel import TLSChannel
+            secured=TLSChannel(secured)
             fps,size,_=host.video_params
             host.run_connection(secured,fps,size,host.remote_audio,'internet protegida',identity.key,relay_guard=stop)
         except Exception:

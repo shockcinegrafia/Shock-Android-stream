@@ -47,7 +47,9 @@ class RemoteTests(unittest.TestCase):
         secured=[];errors=[]
         def server():
             raw,_=listener.accept();raw.settimeout(3)
-            try:secured.append(self.identity.context.wrap_socket(raw,server_side=True))
+            try:
+                from tls_channel import TLSChannel
+                secured.append(TLSChannel(self.identity.context.wrap_socket(raw,server_side=True)))
             except Exception as exc:errors.append(exc);raw.close()
         worker=threading.Thread(target=server);worker.start()
         raw=socket.create_connection(listener.getsockname(),timeout=3)

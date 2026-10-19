@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'windows'))
 from remote import RemoteIdentity
 from protocol import read_exact
+from tls_channel import TLSChannel
 
 with tempfile.TemporaryDirectory() as directory:
     identity=RemoteIdentity(directory)
@@ -19,7 +20,7 @@ with tempfile.TemporaryDirectory() as directory:
             try:
                 raw,_=listener.accept();raw.settimeout(12)
                 with raw:
-                    with identity.context.wrap_socket(raw,server_side=True) as secured:
+                    with TLSChannel(identity.context.wrap_socket(raw,server_side=True)) as secured:
                         if correct:
                             data=bytes(i%251 for i in range(1024*1024))
                             # Server sends video while receiving controls in the opposite direction.
@@ -36,5 +37,5 @@ with tempfile.TemporaryDirectory() as directory:
         server=threading.Thread(target=serve);server.start()
         result=subprocess.run([sys.argv[1],str(listener.getsockname()[1]),identity.fingerprint if correct else '0'*64,str(int(correct))],timeout=30)
         server.join(15);listener.close()
-        assert result.returncode==0,(correct,result.returncode)
+        assert result.returncode==0,(correct,result.returncode,[type(e).__name__+': '+str(e) for e in errors])
         assert not server.is_alive() and not errors,errors

@@ -36,6 +36,7 @@ jobs:
           mkdir -p dist/ShockStream-Relay/windows
           cp -r pc-ipad/relay dist/ShockStream-Relay/
           cp pc-ipad/windows/remote.py dist/ShockStream-Relay/windows/
+          cp pc-ipad/windows/tls_channel.py dist/ShockStream-Relay/windows/
           cp pc-ipad/RELAY-0.6.0.md dist/ShockStream-Relay/LEIA-ME.md
           tar -czf dist/ShockStream-Relay-0.6.0.tar.gz -C dist ShockStream-Relay
       - uses: actions/upload-artifact@v4

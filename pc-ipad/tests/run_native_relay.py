@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory() as directory:
                 assert server.wait_route(pair['route'])
                 result=subprocess.run([sys.argv[1],str(server.port),relay_identity.fingerprint if mode!='wrong-relay' else '0'*64,
                     str(int(mode=='valid')),pc.fingerprint if mode!='wrong-pc' else '0'*64,pair['route'],pair['ticket']],timeout=30)
-                assert result.returncode==0,(mode,result.returncode)
+                assert result.returncode==0,(mode,result.returncode,[type(e).__name__+': '+str(e) for e in errors])
                 if mode=='valid':assert completed.wait(5) and not errors,errors
             finally:
                 stop.set();host.stop_event.set()
