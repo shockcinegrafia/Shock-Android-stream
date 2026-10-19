@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'windows'))
 from remote import RemoteIdentity, endpoint, parse_invitation, pinned_client
-from protocol import MAGIC, proof, read_exact, packet, CLIENT_INFO, INFO, TOUCH, read_packet
+from protocol import MAGIC, proof, read_exact, packet, CLIENT_INFO, INFO, TOUCH, BYE, read_packet
 from host import Host
 
 
@@ -108,6 +108,44 @@ class RemoteTests(unittest.TestCase):
         host.listener=Mock();host.pad=Mock();host.remote_listener=Mock();remote=host.remote_listener
         host.disable_remote();remote.close.assert_called_once()
         host.listener.close.assert_not_called();host.pad.neutral.assert_not_called()
+
+    def test_disabled_remote_handshake_cannot_start_late_session(self):
+        host=Host(lambda _:None,{'hostId':'a'*32,'pin':'123456'})
+        host.pad=Mock();host.authenticate=Mock();connection=Mock();old_listener=Mock()
+        host.remote_listener=Mock() # A new listener must not accept work from the old one.
+        host.run_connection(connection,30,1024,False,'remota TLS',self.identity.key,old_listener)
+        host.authenticate.assert_not_called();self.assertIsNone(host.session)
+        self.assertFalse(host.active_lock.locked())
+
+    def test_remote_listener_routes_authenticated_session_and_recovers_plaintext_probe(self):
+        host=Host(lambda _:None,{'hostId':'a'*32,'pin':'123456'})
+        host.pad=Mock();host.input_mode='touch';host.monitor=None
+        host.video_params=(20,1024,'economy');host.remote_audio=False
+        host.thread=threading.Thread(target=host.stop_event.wait,daemon=True);host.thread.start()
+        self.addCleanup(host.stop)
+        finished=threading.Event();received=[]
+        def session(connection,*args,**kwargs):
+            instance=Mock()
+            def run():
+                try:
+                    connection.sendall(packet(INFO,b'{"mode":"touch"}'))
+                    received.append(read_packet(connection))
+                finally:finished.set()
+            instance.run.side_effect=run;return instance
+        with patch('host.Session',side_effect=session) as factory:
+            host.enable_remote(self.identity,port=0)
+            address=('127.0.0.1',host.remote_listener.getsockname()[1])
+            with socket.create_connection(address,timeout=3) as probe:
+                probe.sendall(b'SHOCK1-not-TLS')
+                try:self.assertFalse(probe.recv(1))
+                except ConnectionResetError:pass
+            with pinned_client(socket.create_connection(address,timeout=3),self.identity.fingerprint) as client:
+                challenge=read_exact(client,38);client.sendall(proof(self.identity.key,challenge[6:]))
+                self.assertEqual(read_exact(client,1),b'\x01')
+                client.sendall(packet(CLIENT_INFO,b'{"width":1024,"height":768}'))
+                self.assertEqual(read_packet(client),(INFO,b'{"mode":"touch"}'))
+                client.sendall(packet(BYE));self.assertTrue(finished.wait(3))
+            self.assertEqual(received,[(BYE,b'')]);factory.assert_called_once()
 
 
 if __name__=='__main__':unittest.main()

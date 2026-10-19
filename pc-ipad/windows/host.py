@@ -492,7 +492,7 @@ class Host:
         connection.settimeout(3)
         return client_size
 
-    def run_connection(self, connection, fps, longest, audio, transport, access_key=None):
+    def run_connection(self, connection, fps, longest, audio, transport, access_key=None, remote_listener=None):
         # Both transports race for one owner; rejected attempts must never reset its input.
         if not self.active_lock.acquire(blocking=False):
             connection.close()
@@ -501,6 +501,8 @@ class Host:
             self.connections.add(connection)
         try:
             if self.stop_event.is_set():
+                return
+            if remote_listener is not None and self.remote_listener is not remote_listener:
                 return
             client_size = self.authenticate(connection, access_key) if access_key is not None else self.authenticate(connection)
             if self.video_params:fps,longest,self.quality=self.video_params
@@ -625,7 +627,7 @@ class Host:
                 # Complete TLS before the SHOCK1 challenge: the LAN PIN is never accepted here.
                 connection=identity.context.wrap_socket(connection,server_side=True)
                 fps,size,_=self.video_params
-                self.run_connection(connection,fps,size,self.remote_audio,'remota TLS',identity.key)
+                self.run_connection(connection,fps,size,self.remote_audio,'remota TLS',identity.key,listener)
             except socket.timeout:
                 continue
             except Exception:
